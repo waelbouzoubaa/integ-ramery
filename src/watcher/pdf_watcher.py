@@ -66,20 +66,26 @@ def fetch_delta(url):
 
 
 def _download_file(item) -> bytes:
-    download_url = item.get("@microsoft.graph.downloadUrl")
-    if download_url:
-        resp = requests.get(download_url, timeout=60)
+    """Telecharge via l'endpoint Graph authentifie (token frais a chaque
+    appel). On evite volontairement l'URL pre-signee @microsoft.graph.downloadUrl
+    de la reponse delta : sur un batch sequentiel de plusieurs minutes, elle a
+    le temps d'expirer avant d'arriver aux derniers fichiers (404 constate)."""
+    item_id = item["id"]
+    drive_id = item.get("parentReference", {}).get("driveId")
+
+    if drive_id:
+        resp = requests.get(
+            f"{GRAPH_URL}/drives/{drive_id}/items/{item_id}/content",
+            headers=get_headers(),
+            allow_redirects=True,
+            timeout=60,
+        )
         resp.raise_for_status()
         return resp.content
 
-    item_id = item["id"]
-    drive_id = item.get("parentReference", {}).get("driveId")
-    resp = requests.get(
-        f"{GRAPH_URL}/drives/{drive_id}/items/{item_id}/content",
-        headers=get_headers(),
-        allow_redirects=True,
-        timeout=60,
-    )
+    # Repli si driveId absent (ne devrait pas arriver sur une reponse delta)
+    download_url = item["@microsoft.graph.downloadUrl"]
+    resp = requests.get(download_url, timeout=60)
     resp.raise_for_status()
     return resp.content
 
