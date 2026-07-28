@@ -6,10 +6,12 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "extraction"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "db"))
 
 from sharepoint_client import get_headers, get_site_id, get_drive_id
 from config import POLL_INTERVAL, SHAREPOINT_FOLDER
 from gemini_extract import extract_pdf
+from load_json import get_conn, ensure_schema, load_items
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -82,16 +84,23 @@ def _download_file(item) -> bytes:
     return resp.content
 
 
-def handle_pdf(name: str, file_bytes: bytes, item: dict) -> None:
+def handle_pdf(name: str, file_bytes: bytes, item: dict, conn) -> None:
     """Recoit les octets telecharges directement depuis SharePoint (rien
-    n'est ecrit sur disque avant extraction) et lance l'extraction Gemini.
-    Ne doit jamais lever d'exception : un fichier en echec ne doit pas
-    interrompre le traitement des suivants."""
+    n'est ecrit sur disque avant extraction), lance l'extraction Gemini,
+    dump en JSON (cache/audit) puis charge en Postgres. Ne doit jamais
+    lever d'exception : un fichier en echec ne doit pas interrompre le
+    traitement des suivants."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     dest = OUT_DIR / f"{Path(name).stem}.json"
 
     if dest.exists():
-        print(f"  -> Deja extrait, on saute ({dest.name})")
+        print(f"  -> Deja extrait ({dest.name}), chargement Postgres...")
+        try:
+            data = json.loads(dest.read_text(encoding="utf-8"))
+            n = load_items(conn, Path(name).stem, data["items"])
+            print(f"  -> {n} lignes chargees en base")
+        except Exception as exc:
+            print(f"  -> Erreur chargement Postgres : {exc!r}")
         return
 
     print(f"  -> Extraction en cours : {name} ({len(file_bytes)} octets)")
@@ -100,12 +109,13 @@ def handle_pdf(name: str, file_bytes: bytes, item: dict) -> None:
         print(f"  -> {len(result.items)} lignes de prix extraites")
         dest.write_text(result.model_dump_json(indent=2), encoding="utf-8")
         print(f"  -> Dump : {dest}")
-        # TODO: charger_postgres(result, source_web_url=item.get("webUrl"))
+        n = load_items(conn, Path(name).stem, result.model_dump()["items"])
+        print(f"  -> {n} lignes chargees en base")
     except Exception as exc:
         print(f"  -> Erreur extraction : {exc!r}")
 
 
-def process_changes(items, file_cache):
+def process_changes(items, file_cache, conn):
     for item in items:
         item_id = item["id"]
 
@@ -141,7 +151,7 @@ def process_changes(items, file_cache):
             print(f"  -> Erreur telechargement : {exc}")
             continue
 
-        handle_pdf(name, file_bytes, item)
+        handle_pdf(name, file_bytes, item, conn)
 
 
 def run(once: bool = False):
@@ -149,6 +159,9 @@ def run(once: bool = False):
     site_id = get_site_id()
     drive_id = get_drive_id(site_id)
     print(f"Drive ID : {drive_id}")
+
+    conn = get_conn()
+    ensure_schema(conn)
 
     delta_link, file_cache = load_state(drive_id)
     if not delta_link:
@@ -164,7 +177,7 @@ def run(once: bool = False):
             print(f"{len(fichiers)} changement(s) detecte(s)")
         else:
             print("Aucun changement.")
-        process_changes(items, file_cache)
+        process_changes(items, file_cache, conn)
 
         save_state(drive_id, new_delta_link, file_cache)
         delta_link = new_delta_link

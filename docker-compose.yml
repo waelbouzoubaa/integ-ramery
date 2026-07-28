@@ -26,5 +26,18 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  streamlit:
+    build: .
+    container_name: integ-ramery2-streamlit
+    env_file: .env
+    working_dir: /app/src/restitution
+    command: ["uv", "run", "--no-sync", "streamlit", "run", "app.py", "--server.address=0.0.0.0"]
+    ports:
+      - "8502:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:

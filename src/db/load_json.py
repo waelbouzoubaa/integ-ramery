@@ -23,10 +23,10 @@ def ensure_schema(conn):
     conn.commit()
 
 
-def load_file(conn, path: Path) -> int:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    items = data["items"]
-
+def load_items(conn, filename: str, items: list[dict]) -> int:
+    """Insere un document (par nom de fichier, sans extension) + ses lignes.
+    Idempotent : repart de zero pour ce document a chaque appel, donc
+    rejouable sans creer de doublons."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -35,11 +35,10 @@ def load_file(conn, path: Path) -> int:
             ON CONFLICT (filename) DO UPDATE SET filename = EXCLUDED.filename
             RETURNING id
             """,
-            (path.stem,),
+            (filename,),
         )
         document_id = cur.fetchone()[0]
 
-        # Idempotent : on repart de zero pour ce document a chaque chargement.
         cur.execute("DELETE FROM price_lines WHERE document_id = %s", (document_id,))
 
         for item in items:
@@ -63,8 +62,14 @@ def load_file(conn, path: Path) -> int:
                 ),
             )
     conn.commit()
-    print(f"  -> {path.name} : {len(items)} lignes chargees (document_id={document_id})")
     return len(items)
+
+
+def load_file(conn, path: Path) -> int:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    n = load_items(conn, path.stem, data["items"])
+    print(f"  -> {path.name} : {n} lignes chargees")
+    return n
 
 
 def main():
