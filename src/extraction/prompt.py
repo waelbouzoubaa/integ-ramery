@@ -27,6 +27,11 @@ RÈGLES DE SÉLECTION
    - Une désignation peut s'étaler sur plusieurs lignes de texte avant d'arriver
      à l'unité/quantité (parfois avec un texte de filler du genre "Ce prix
      rémunère :" au milieu) — regroupe tout ça en une seule désignation propre.
+   - Lis attentivement TOUT le texte imprimé sur la ligne, même quand la mise
+     en page est dense ou que des lignes se chevauchent visuellement (tableaux
+     resserrés en fin de document par exemple). Ne laisse jamais une désignation
+     vide ou réduite à l'unité/au prix si un texte descriptif est présent sur
+     la page à cet endroit.
 
 3. CHAPITRE ET SOUS-FAMILLE — parcours le document dans l'ordre et maintiens
    deux valeurs courantes :
@@ -40,6 +45,17 @@ RÈGLES DE SÉLECTION
      ne le garde surtout pas pour la ligne suivante si elle n'en est pas l'enfant.
    - `sous_famille` est null si la ligne extraite est un enfant direct du
      chapitre, sans header intermédiaire.
+
+4. NUMERO REPETE AVEC DESIGNATION MANQUANTE — certains documents (accords-cadres
+   avec plusieurs "opérations"/chantiers types) répètent la même grille de prix
+   plusieurs fois dans le document, avec les mêmes numéros et les mêmes prix
+   mais des quantités différentes à chaque fois. Si un numéro que tu as déjà
+   rencontré réapparaît avec le même prix unitaire mais que sa désignation sur
+   cette occurrence est vide, tronquée ou anormalement courte par rapport à sa
+   première apparition, réutilise la désignation complète de la première
+   apparition de ce numéro. Ne laisse jamais une ligne avec juste "unité + prix"
+   sans aucun texte descriptif si ce texte existe ailleurs dans le document
+   pour ce même numéro.
 
 CHAMPS DE SORTIE (pour chaque ligne retenue)
 - numero : le numéro/code brut tel qu'écrit (ex: "A.7a", "311,1")

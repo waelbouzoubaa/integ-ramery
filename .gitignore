@@ -5,3 +5,4 @@ data/state/
 out/
 __pycache__/
 *.pyc
+*.bck
