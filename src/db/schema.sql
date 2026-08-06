@@ -33,6 +33,27 @@ ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS designation_canonique text;
 -- NULL tant que la fusion n'a pas tourne ; la vue retombe sur designation
 -- brute en attendant (voir fusion_designations.py).
 
+-- Cache des decisions Gemini deja prises pour une paire de designations,
+-- pour ne jamais repayer un appel IA sur une paire deja jugee : a chaque
+-- lancement de fusion_designations.py, seules les paires absentes d'ici
+-- partent chez Gemini. designation_a < designation_b (ordre alphabetique)
+-- pour que la paire (a,b) et (b,a) soient toujours la meme ligne.
+CREATE TABLE IF NOT EXISTS fusion_decisions (
+    id            bigserial PRIMARY KEY,
+    sous_famille  text,
+    unite         text,
+    designation_a text        NOT NULL,
+    designation_b text        NOT NULL,
+    fusionner     boolean     NOT NULL,
+    decide_le     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fusion_decisions_cle
+    ON fusion_decisions (
+        coalesce(sous_famille, ''), coalesce(unite, ''),
+        designation_a, designation_b
+    );
+
 CREATE INDEX IF NOT EXISTS idx_price_lines_designation ON price_lines (designation);
 CREATE INDEX IF NOT EXISTS idx_price_lines_document    ON price_lines (document_id);
 CREATE INDEX IF NOT EXISTS idx_price_lines_desig_trgm

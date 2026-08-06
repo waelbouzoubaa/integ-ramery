@@ -204,17 +204,48 @@ def main():
         (sf, u, da, db) for sf, u, da, db in candidats
         if uf.find((sf, u, da)) != uf.find((sf, u, db)) and memes_nombres(da, db)
     ]
-    print(f"{len(candidats)} paires candidates envoyees a Gemini pour validation")
 
-    if candidats:
+    # Cache : les paires deja jugees par Gemini lors d'un run precedent ne
+    # sont jamais renvoyees a l'IA, meme si le run est relance apres l'ajout
+    # de nouveaux documents (sinon on repaye pour re-valider tout l'existant
+    # a chaque fois).
+    with conn.cursor() as cur:
+        cur.execute("SELECT sous_famille, unite, designation_a, designation_b, fusionner FROM fusion_decisions")
+        decisions_connues = {(sf, u, da, db): f for sf, u, da, db, f in cur.fetchall()}
+
+    a_juger = []
+    for sf, u, da, db in candidats:
+        connue = decisions_connues.get((sf, u, da, db))
+        if connue is None:
+            a_juger.append((sf, u, da, db))
+        elif connue:
+            uf.union((sf, u, da), (sf, u, db))
+    print(f"{len(candidats) - len(a_juger)} paires deja jugees lors d'un run precedent (cache, gratuit)")
+    print(f"{len(a_juger)} paires nouvelles envoyees a Gemini pour validation")
+
+    if a_juger:
         client = _get_client()
-        for i in range(0, len(candidats), TAILLE_LOT):
-            lot = candidats[i:i + TAILLE_LOT]
+        nouvelles_decisions = []
+        for i in range(0, len(a_juger), TAILLE_LOT):
+            lot = a_juger[i:i + TAILLE_LOT]
             decisions = valider_par_lot(client, lot)
             for (sf, u, da, db), fusionner in zip(lot, decisions):
                 if fusionner:
                     uf.union((sf, u, da), (sf, u, db))
-            print(f"  lot {i // TAILLE_LOT + 1}/{-(-len(candidats) // TAILLE_LOT)} traite")
+                nouvelles_decisions.append((sf, u, da, db, fusionner))
+            print(f"  lot {i // TAILLE_LOT + 1}/{-(-len(a_juger) // TAILLE_LOT)} traite")
+
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO fusion_decisions (sous_famille, unite, designation_a, designation_b, fusionner)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (coalesce(sous_famille, ''), coalesce(unite, ''), designation_a, designation_b)
+                DO UPDATE SET fusionner = EXCLUDED.fusionner, decide_le = now()
+                """,
+                nouvelles_decisions,
+            )
+        conn.commit()
 
     # 3. Clusters finaux + choix de la designation canonique
     clusters: dict[tuple, list] = defaultdict(list)
