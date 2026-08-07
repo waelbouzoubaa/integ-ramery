@@ -24,6 +24,15 @@ def get_conn():
 
 conn = get_conn()
 
+
+def _sql_none(v):
+    # pandas represente une valeur NULL de colonne texte par NaN (float),
+    # meme quand le dtype de colonne reste "str" - psycopg refuse alors de
+    # comparer ce NaN a une colonne text ("text = double precision"). On le
+    # reconvertit en None avant de l'utiliser comme parametre SQL.
+    return None if pd.isna(v) else v
+
+
 st.title("Prix unitaires — moyenne par désignation")
 st.caption(
     "Moyenne calculee par (sous-famille, unite, designation) : meme texte "
@@ -70,8 +79,8 @@ if not df.empty:
     )
     choix = st.selectbox("Choisir une ligne (sous-famille | unité | désignation)", options=df["libelle_choix"].tolist())
     ligne = df[df["libelle_choix"] == choix].iloc[0]
-    sous_famille_choisie = ligne["sous_famille"]
-    unite_choisie = ligne["unite"]
+    sous_famille_choisie = _sql_none(ligne["sous_famille"])
+    unite_choisie = _sql_none(ligne["unite"])
     designation_choisie = ligne["designation"]
 
     detail_query = """

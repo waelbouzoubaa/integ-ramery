@@ -21,6 +21,15 @@ def get_conn():
 
 conn = get_conn()
 
+
+def _sql_none(v):
+    # pandas represente une valeur NULL de colonne texte par NaN (float),
+    # meme quand le dtype de colonne reste "str" - psycopg refuse alors de
+    # comparer ce NaN a une colonne text ("text = double precision"). On le
+    # reconvertit en None avant de l'utiliser comme parametre SQL.
+    return None if pd.isna(v) else v
+
+
 st.title("Revue des groupes de désignations")
 st.caption(
     "Un groupe rassemble plusieurs désignations jugées identiques (normalisation "
@@ -66,16 +75,23 @@ groupes_df["libelle"] = (
 )
 
 choix = st.selectbox("Choisir un groupe", options=groupes_df["libelle"].tolist())
-groupe = groupes_df[groupes_df["libelle"] == choix].iloc[0]
-groupe_id = int(groupe["id"])
-canon = groupe["designation_canonique"]
-sf = groupe["sous_famille"]
-u = groupe["unite"]
+# Extraction colonne par colonne (pas via .iloc[0] sur la ligne complete) :
+# une ligne melant texte/bool/Decimal se fait upcaster par pandas et un
+# sous_famille NULL devient NaN (float), ce que Postgres refuse de comparer
+# a une colonne text (IS NOT DISTINCT FROM $2 -> text = double precision).
+ligne_groupe = groupes_df[groupes_df["libelle"] == choix]
+groupe_id = int(ligne_groupe["id"].iloc[0])
+canon = ligne_groupe["designation_canonique"].iloc[0]
+sf = _sql_none(ligne_groupe["sous_famille"].iloc[0])
+u = _sql_none(ligne_groupe["unite"].iloc[0])
+valide = bool(ligne_groupe["valide"].iloc[0])
+nb_membres = int(ligne_groupe["nb_membres"].iloc[0])
+seuil_confiance = float(ligne_groupe["seuil_confiance"].iloc[0])
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Statut", "Validé" if groupe["valide"] else "À valider")
-col2.metric("Membres", int(groupe["nb_membres"]))
-col3.metric("Seuil de confiance", f"{groupe['seuil_confiance']:.2f}")
+col1.metric("Statut", "Validé" if valide else "À valider")
+col2.metric("Membres", nb_membres)
+col3.metric("Seuil de confiance", f"{seuil_confiance:.2f}")
 
 membres_df = pd.read_sql(
     """
@@ -147,9 +163,9 @@ with col_retirer:
     )
 
     if ligne_choisie != "(aucune)":
-        ligne = membres_df[membres_df["libelle_ligne"] == ligne_choisie].iloc[0]
-        ligne_id = int(ligne["id"])
-        designation_brute = ligne["designation"]
+        ligne_membre = membres_df[membres_df["libelle_ligne"] == ligne_choisie]
+        ligne_id = int(ligne_membre["id"].iloc[0])
+        designation_brute = ligne_membre["designation"].iloc[0]
 
         # Reassignation possible uniquement vers un groupe de meme
         # (sous_famille, unite) : hors de ca, ce ne serait pas un prix
@@ -173,9 +189,9 @@ with col_retirer:
                 choix_destination = st.selectbox(
                     "Groupe de destination", options=autres_groupes_df["libelle"].tolist()
                 )
-                autre_canon = autres_groupes_df[
-                    autres_groupes_df["libelle"] == choix_destination
-                ].iloc[0]["designation_canonique"]
+                autre_canon = autres_groupes_df.loc[
+                    autres_groupes_df["libelle"] == choix_destination, "designation_canonique"
+                ].iloc[0]
 
         peut_confirmer = action == "La laisser seule" or autre_canon is not None
         if st.button("🗑️ Confirmer le retrait", disabled=not peut_confirmer):
