@@ -1,4 +1,8 @@
+import contextlib
+import io
 import os
+import sys
+from pathlib import Path
 
 import pandas as pd
 import psycopg
@@ -6,6 +10,15 @@ import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# fusion_designations.py vit dans src/db, pas dans src/restitution : on
+# l'ajoute au path pour pouvoir appeler main() directement depuis le bouton,
+# sans dupliquer sa logique ici.
+DB_DIR = Path(__file__).resolve().parents[2] / "db"
+if str(DB_DIR) not in sys.path:
+    sys.path.insert(0, str(DB_DIR))
+
+import fusion_designations  # noqa: E402
 
 st.set_page_config(page_title="Revue des groupes", page_icon="🔍", layout="wide")
 
@@ -36,6 +49,26 @@ st.caption(
     "automatique ou validation Gemini). Valide un groupe pour verrouiller sa "
     "composition, ou retire une ligne si le regroupement te semble faux."
 )
+
+st.subheader("Lancer la fusion")
+st.caption(
+    "Recalcule les quasi-doublons (normalisation + Gemini) sur toute la base "
+    "et rattache les nouvelles désignations aux groupes déjà validés. Les "
+    "paires déjà jugées lors d'un run précédent ne sont pas repayées (cache)."
+)
+if st.button("🔄 Lancer la fusion des désignations"):
+    sortie = io.StringIO()
+    with st.spinner("Fusion en cours (peut prendre plusieurs minutes selon le nombre de nouvelles paires)..."):
+        with contextlib.redirect_stdout(sortie):
+            fusion_designations.main()
+    st.session_state["fusion_output"] = sortie.getvalue()
+    st.rerun()
+
+if "fusion_output" in st.session_state:
+    with st.expander("Résultat de la dernière fusion", expanded=True):
+        st.code(st.session_state["fusion_output"])
+
+st.divider()
 
 groupes_df = pd.read_sql(
     """
