@@ -95,8 +95,8 @@ col3.metric("Seuil de confiance", f"{seuil_confiance:.2f}")
 
 membres_df = pd.read_sql(
     """
-    SELECT pl.id, pl.designation, pl.chapitre, pl.prix_unitaire, pl.montant_ht,
-           pd.filename AS document, pl.en_attente
+    SELECT pl.id, pl.designation, pl.sous_famille, pl.unite, pl.chapitre,
+           pl.prix_unitaire, pl.montant_ht, pd.filename AS document, pl.en_attente
     FROM price_lines pl
     JOIN price_documents pd ON pd.id = pl.document_id
     WHERE coalesce(pl.designation_canonique, pl.designation) = %s
@@ -120,6 +120,8 @@ st.dataframe(
     hide_index=True,
     column_config={
         "designation": "Désignation",
+        "sous_famille": "Sous-famille",
+        "unite": "Unité",
         "chapitre": "Chapitre",
         "prix_unitaire": st.column_config.NumberColumn("Prix unitaire (€)", format="%.2f"),
         "montant_ht": st.column_config.NumberColumn("Montant HT (€)", format="%.2f"),
