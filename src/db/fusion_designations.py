@@ -258,6 +258,21 @@ def main():
     with conn.cursor() as cur:
         for membres in a_fusionner.values():
             canon = choisir_canonique(membres, occurrences)
+            sf_groupe, unite_groupe, _ = membres[0]  # meme (sous_famille, unite) pour tous les membres d'un cluster
+
+            # Cree le groupe s'il n'existe pas encore. DO NOTHING (pas
+            # d'UPDATE) : si le groupe existe deja et a ete valide par un
+            # humain, on ne touche jamais a son statut ici.
+            cur.execute(
+                """
+                INSERT INTO groupes (designation_canonique, sous_famille, unite)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (designation_canonique, coalesce(sous_famille, ''), coalesce(unite, ''))
+                DO NOTHING
+                """,
+                (canon, sf_groupe, unite_groupe),
+            )
+
             cur.executemany(
                 """
                 UPDATE price_lines
@@ -265,6 +280,7 @@ def main():
                 WHERE designation = %s
                   AND sous_famille IS NOT DISTINCT FROM %s
                   AND unite IS NOT DISTINCT FROM %s
+                  AND fusion_manuelle = false
                 """,
                 [(canon, d, sf, u) for sf, u, d in membres],
             )

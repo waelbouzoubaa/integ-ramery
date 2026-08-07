@@ -33,6 +33,35 @@ ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS designation_canonique text;
 -- NULL tant que la fusion n'a pas tourne ; la vue retombe sur designation
 -- brute en attendant (voir fusion_designations.py).
 
+ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS fusion_manuelle boolean NOT NULL DEFAULT false;
+-- Un humain a decide explicitement l'appartenance (groupe) de cette ligne
+-- (validation d'un groupe qui la contient, reassignation apres retrait, ou
+-- laissee seule apres retrait). Le script de fusion automatique ne doit
+-- JAMAIS modifier designation_canonique sur une ligne ou ce flag est true.
+
+ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS en_attente boolean NOT NULL DEFAULT false;
+-- true = cette ligne a ete ajoutee automatiquement a un groupe deja valide
+-- (matching incremental contre le nom du groupe, au-dessus de son seuil de
+-- confiance), mais pas encore reconfirmee par un humain. Sert juste a
+-- l'affichage Streamlit (couleur differente) ; repasse a false quand le
+-- groupe est revalide.
+
+-- Un groupe = une combinaison (designation_canonique, sous_famille, unite).
+-- Porte le statut de validation humaine et le seuil de confiance qui decide
+-- si une future designation ressemblante y est ajoutee automatiquement.
+CREATE TABLE IF NOT EXISTS groupes (
+    id                    bigserial PRIMARY KEY,
+    designation_canonique text         NOT NULL,
+    sous_famille          text,
+    unite                 text,
+    valide                boolean      NOT NULL DEFAULT false,
+    seuil_confiance       numeric(3,2) NOT NULL DEFAULT 0.75,
+    valide_le             timestamptz
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_groupes_cle
+    ON groupes (designation_canonique, coalesce(sous_famille, ''), coalesce(unite, ''));
+
 -- Cache des decisions Gemini deja prises pour une paire de designations,
 -- pour ne jamais repayer un appel IA sur une paire deja jugee : a chaque
 -- lancement de fusion_designations.py, seules les paires absentes d'ici
