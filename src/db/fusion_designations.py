@@ -150,13 +150,88 @@ def valider_par_lot(client: genai.Client, lot: list[tuple]) -> list[bool]:
     return [par_id.get(i, False) for i in range(len(lot))]
 
 
+def matcher_contre_groupes_valides(conn) -> int:
+    """Phase 0 : les designations pas encore rattachees a un groupe sont
+    comparees aux groupes DEJA VALIDES par un humain, chacun avec son propre
+    seuil_confiance (colonne groupes.seuil_confiance). Au-dessus du seuil, la
+    designation est rattachee automatiquement (designation_canonique) mais
+    marquee en_attente=true : elle apparait en Streamlit dans une couleur
+    differente tant qu'un humain n'a pas revalide le groupe.
+
+    Un rejet humain anterieur (retrait d'un groupe, enregistre dans
+    fusion_decisions avec fusionner=false) est toujours respecte : on ne
+    rattache jamais automatiquement ce qu'un humain a explicitement exclu.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (o.sous_famille, o.unite, o.designation)
+                   o.sous_famille, o.unite, o.designation, g.designation_canonique
+            FROM (
+                SELECT DISTINCT sous_famille, unite, designation
+                FROM price_lines
+                WHERE designation_canonique IS NULL
+            ) o
+            JOIN groupes g
+              ON g.valide = true
+             AND o.sous_famille IS NOT DISTINCT FROM g.sous_famille
+             AND o.unite IS NOT DISTINCT FROM g.unite
+             AND o.designation <> g.designation_canonique
+            WHERE similarity(lower(o.designation), lower(g.designation_canonique)) >= g.seuil_confiance
+              AND NOT EXISTS (
+                  SELECT 1 FROM fusion_decisions fd
+                  WHERE fd.sous_famille IS NOT DISTINCT FROM o.sous_famille
+                    AND fd.unite IS NOT DISTINCT FROM o.unite
+                    AND fd.fusionner = false
+                    AND ((fd.designation_a = o.designation AND fd.designation_b = g.designation_canonique)
+                      OR (fd.designation_a = g.designation_canonique AND fd.designation_b = o.designation))
+              )
+            ORDER BY o.sous_famille, o.unite, o.designation,
+                     similarity(lower(o.designation), lower(g.designation_canonique)) DESC
+            """
+        )
+        candidats = cur.fetchall()
+
+        nb_ajouts = 0
+        for sf, u, d, canon in candidats:
+            if not memes_nombres(d, canon):
+                continue
+            cur.execute(
+                """
+                UPDATE price_lines
+                SET designation_canonique = %s, en_attente = true
+                WHERE designation = %s
+                  AND sous_famille IS NOT DISTINCT FROM %s
+                  AND unite IS NOT DISTINCT FROM %s
+                  AND fusion_manuelle = false
+                """,
+                (canon, d, sf, u),
+            )
+            nb_ajouts += cur.rowcount
+    conn.commit()
+    print(f"{nb_ajouts} lignes rattachees automatiquement a un groupe deja valide (en attente de confirmation)")
+    return nb_ajouts
+
+
 def main():
     conn = get_conn()
 
+    matcher_contre_groupes_valides(conn)
+
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sous_famille, unite, designation, count(*) "
-            "FROM price_lines GROUP BY sous_famille, unite, designation"
+            """
+            SELECT sous_famille, unite, designation, count(*)
+            FROM price_lines pl
+            WHERE NOT EXISTS (
+                SELECT 1 FROM groupes g
+                WHERE g.valide = true
+                  AND g.designation_canonique = pl.designation_canonique
+                  AND g.sous_famille IS NOT DISTINCT FROM pl.sous_famille
+                  AND g.unite IS NOT DISTINCT FROM pl.unite
+            )
+            GROUP BY sous_famille, unite, designation
+            """
         )
         occurrences = {(sf, u, d): n for sf, u, d, n in cur.fetchall()}
 
