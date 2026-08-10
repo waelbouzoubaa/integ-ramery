@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS groupes (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_groupes_cle
     ON groupes (designation_canonique, coalesce(sous_famille, ''), coalesce(unite, ''));
 
+ALTER TABLE groupes ADD COLUMN IF NOT EXISTS membres_signature text;
+-- Empreinte de la composition du groupe au moment du dernier calcul de
+-- seuil_confiance (designations brutes triees, jointes). Sert de cache :
+-- si la composition n'a pas change depuis le dernier run, on ne repaie pas
+-- Gemini pour re-evaluer la coherence du groupe (voir fusion_designations.py).
+
 -- Cache des decisions Gemini deja prises pour une paire de designations,
 -- pour ne jamais repayer un appel IA sur une paire deja jugee : a chaque
 -- lancement de fusion_designations.py, seules les paires absentes d'ici

@@ -69,6 +69,46 @@ class Decisions(BaseModel):
     decisions: list[Decision]
 
 
+PROMPT_CONFIANCE = """Tu recois la liste complete des designations de produits BTP regroupees
+automatiquement dans un meme groupe (meme sous-famille, meme unite), car
+jugees quasi-identiques par un premier passage de validation.
+
+Evalue, sur une echelle de 0.0 a 1.0, ta confiance que TOUTES ces
+designations decrivent reellement le MEME produit (donc que leurs prix
+peuvent legitimement etre moyennes ensemble sans fausser le resultat) :
+
+- 1.0 : aucun doute, ce sont des reformulations/variantes cosmetiques
+  evidentes du meme produit (faute de frappe, pluriel, preambule...).
+- 0.5 : doute raisonnable, une ou plusieurs designations pourraient decrire
+  une variante technique differente (classe, diametre, couleur...).
+- 0.0 : tu penses qu'il y a probablement une erreur de regroupement.
+
+Reponds uniquement avec un score entre 0.0 et 1.0."""
+
+
+class ScoreConfiance(BaseModel):
+    score: float
+
+
+def evaluer_confiance_groupe(client: genai.Client, sous_famille, unite, designations: list[str]) -> float:
+    """Un seul appel Gemini par GROUPE (pas par paire) : evalue la coherence
+    d'ensemble du groupe. Le score sert de seuil_confiance pour le matching
+    incremental des futures designations contre ce groupe (voir
+    matcher_contre_groupes_valides)."""
+    lignes = "\n".join(f"- {d}" for d in designations)
+    contenu = f"sous_famille={sous_famille or '(aucune)'}, unite={unite or '(aucune)'}\n{lignes}"
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=[PROMPT_CONFIANCE, contenu],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=ScoreConfiance,
+        ),
+    )
+    result = response.parsed if response.parsed is not None else ScoreConfiance.model_validate_json(response.text)
+    return max(0.0, min(1.0, result.score))
+
+
 _client: genai.Client | None = None
 
 
@@ -330,23 +370,54 @@ def main():
 
     print(f"\n{len(a_fusionner)} groupes de quasi-doublons fusionnes au total")
 
+    client = None
+    nb_evalues = 0
+    nb_caches = 0
+
     with conn.cursor() as cur:
         for membres in a_fusionner.values():
             canon = choisir_canonique(membres, occurrences)
             sf_groupe, unite_groupe, _ = membres[0]  # meme (sous_famille, unite) pour tous les membres d'un cluster
+            designations_brutes = sorted({d for _, _, d in membres})
+            signature = "|".join(designations_brutes)
 
-            # Cree le groupe s'il n'existe pas encore. DO NOTHING (pas
-            # d'UPDATE) : si le groupe existe deja et a ete valide par un
-            # humain, on ne touche jamais a son statut ici.
             cur.execute(
                 """
-                INSERT INTO groupes (designation_canonique, sous_famille, unite)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (designation_canonique, coalesce(sous_famille, ''), coalesce(unite, ''))
-                DO NOTHING
+                SELECT valide, membres_signature FROM groupes
+                WHERE designation_canonique = %s
+                  AND coalesce(sous_famille, '') = coalesce(%s, '')
+                  AND coalesce(unite, '') = coalesce(%s, '')
                 """,
                 (canon, sf_groupe, unite_groupe),
             )
+            existant = cur.fetchone()
+            deja_valide = existant is not None and existant[0]
+            composition_inchangee = existant is not None and existant[1] == signature
+
+            if deja_valide or composition_inchangee:
+                # Verrouille par un humain, ou deja evalue pour cette exacte
+                # composition : on ne repaie jamais Gemini pour la meme chose.
+                nb_caches += 1
+            else:
+                if client is None:
+                    client = _get_client()
+                score = evaluer_confiance_groupe(client, sf_groupe, unite_groupe, designations_brutes)
+                nb_evalues += 1
+
+                # Cree ou met a jour le groupe avec le score de Gemini. Le
+                # WHERE groupes.valide = false protege un groupe deja
+                # verrouille par un humain d'un ecrasement concurrent.
+                cur.execute(
+                    """
+                    INSERT INTO groupes (designation_canonique, sous_famille, unite, seuil_confiance, membres_signature)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (designation_canonique, coalesce(sous_famille, ''), coalesce(unite, ''))
+                    DO UPDATE SET seuil_confiance = EXCLUDED.seuil_confiance,
+                                  membres_signature = EXCLUDED.membres_signature
+                    WHERE groupes.valide = false
+                    """,
+                    (canon, sf_groupe, unite_groupe, score, signature),
+                )
 
             cur.executemany(
                 """
@@ -360,6 +431,7 @@ def main():
                 [(canon, d, sf, u) for sf, u, d in membres],
             )
     conn.commit()
+    print(f"{nb_evalues} groupes evalues par Gemini (nouveaux ou composition modifiee), {nb_caches} inchanges (score conserve)")
     conn.close()
 
 
