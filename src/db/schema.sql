@@ -94,6 +94,19 @@ CREATE INDEX IF NOT EXISTS idx_price_lines_document    ON price_lines (document_
 CREATE INDEX IF NOT EXISTS idx_price_lines_desig_trgm
     ON price_lines USING gin (designation gin_trgm_ops);
 
+-- Parametre unique et modifiable (table a une seule ligne, id force a 1) :
+-- seuil de coefficient de variation (ecart-type / prix moyen, en %) au-dela
+-- duquel un groupe de prix est considere comme ayant des valeurs
+-- aberrantes. Volontairement en base (pas une constante Python) pour etre
+-- ajustable depuis Streamlit sans redeploiement - demande explicite pour
+-- pouvoir affiner ce seuil selon les retours clients.
+CREATE TABLE IF NOT EXISTS parametres (
+    id                int          PRIMARY KEY DEFAULT 1,
+    seuil_cv_anomalie numeric(5,2) NOT NULL DEFAULT 5.0,
+    CHECK (id = 1)
+);
+INSERT INTO parametres (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
 -- Vue de travail : moyenne de prix par (sous_famille, unite, designation
 -- canonique). sous_famille ET unite font partie de la cle :
 -- - sous_famille : "avec grille fonte 100 mm" sous "classe 250" vs "classe
@@ -104,18 +117,115 @@ CREATE INDEX IF NOT EXISTS idx_price_lines_desig_trgm
 -- Ne jamais retirer l'un ou l'autre de ce GROUP BY.
 -- designation_canonique vaut NULL tant que la fusion n'a pas tourne ; la vue
 -- utilise designation brute en attendant (COALESCE).
+--
+-- DETECTION ET CORRECTION DES VALEURS ABERRANTES (anomalies de prix) :
+-- Methode IQR (interquartile range), en un seul passage (pas d'iteration) :
+-- pour chaque groupe, on calcule Q1 (25e percentile) et Q3 (75e percentile)
+-- des prix unitaires, puis l'intervalle "normal" = [Q1 - 1.5*IQR, Q3 + 1.5*IQR]
+-- avec IQR = Q3 - Q1. Toute valeur hors de cet intervalle est exclue du
+-- calcul de la moyenne corrigee.
+-- Une anomalie n'est signalee (anomalie_detectee = true) que si LES DEUX
+-- conditions sont vraies :
+--   1. le coefficient de variation brut (ecart-type / moyenne, en %) depasse
+--      le seuil configurable de la table parametres (defaut 5%) - le CV est
+--      utilise plutot qu'un ecart-type absolu en euros pour rester coherent
+--      quelle que soit l'echelle de prix du produit (un ecart de 500 EUR est
+--      enorme sur un prix a 10 EUR, negligeable sur un prix a 10 000 EUR) ;
+--   2. la methode IQR identifie au moins une valeur reellement hors norme
+--      pour l'expliquer (nb_valeurs_aberrantes > 0).
+-- prix_moyen_corrige / ecart_type_corrige valent la moyenne/ecart-type
+-- recalcules SANS les valeurs aberrantes quand anomalie_detectee est vrai,
+-- sinon ils sont identiques a prix_moyen / ecart_type (rien de corrige).
+-- Le detail (bornes IQR, valeurs exclues) reste consultable via les
+-- colonnes q1/q3/borne_basse/borne_haute et via la table price_lines
+-- elle-meme (aucune donnee brute n'est jamais supprimee ou modifiee).
+--
 -- DROP necessaire : CREATE OR REPLACE ne permet pas de changer l'ordre des
 -- colonnes d'une vue existante (ici on insere sous_famille en 1ere position).
 DROP VIEW IF EXISTS prix_moyen_par_designation;
 CREATE VIEW prix_moyen_par_designation AS
+WITH quartiles AS (
+    -- percentile_cont est un agregat "ordered-set" : Postgres ne l'autorise
+    -- pas avec OVER (fenetre), il faut passer par un GROUP BY classique puis
+    -- rejoindre ce resultat aux lignes brutes (etape suivante).
+    SELECT
+        sous_famille,
+        unite,
+        coalesce(designation_canonique, designation) AS designation,
+        percentile_cont(0.25) WITHIN GROUP (ORDER BY prix_unitaire) AS q1,
+        percentile_cont(0.75) WITHIN GROUP (ORDER BY prix_unitaire) AS q3
+    FROM price_lines
+    GROUP BY sous_famille, unite, coalesce(designation_canonique, designation)
+),
+bornes AS (
+    SELECT
+        *,
+        (q3 - q1)             AS iqr,
+        q1 - 1.5 * (q3 - q1)  AS borne_basse,
+        q3 + 1.5 * (q3 - q1)  AS borne_haute
+    FROM quartiles
+),
+lignes_avec_bornes AS (
+    SELECT
+        pl.sous_famille,
+        pl.unite,
+        coalesce(pl.designation_canonique, pl.designation) AS designation,
+        pl.prix_unitaire,
+        b.q1, b.q3, b.borne_basse, b.borne_haute
+    FROM price_lines pl
+    JOIN bornes b
+      ON coalesce(pl.designation_canonique, pl.designation) = b.designation
+     AND pl.sous_famille IS NOT DISTINCT FROM b.sous_famille
+     AND pl.unite IS NOT DISTINCT FROM b.unite
+),
+agrege AS (
+    SELECT
+        sous_famille,
+        unite,
+        designation,
+        count(*)                                                                              AS nb_occurrences,
+        avg(prix_unitaire)                                                                     AS prix_moyen,
+        stddev_samp(prix_unitaire)                                                             AS ecart_type,
+        min(prix_unitaire)                                                                     AS prix_min,
+        max(prix_unitaire)                                                                     AS prix_max,
+        min(q1)                                                                                AS q1,
+        min(q3)                                                                                AS q3,
+        min(borne_basse)                                                                       AS borne_basse,
+        min(borne_haute)                                                                       AS borne_haute,
+        count(*) FILTER (WHERE prix_unitaire < borne_basse OR prix_unitaire > borne_haute)      AS nb_valeurs_aberrantes,
+        avg(prix_unitaire) FILTER (WHERE prix_unitaire BETWEEN borne_basse AND borne_haute)     AS prix_moyen_sans_aberrantes,
+        stddev_samp(prix_unitaire) FILTER (WHERE prix_unitaire BETWEEN borne_basse AND borne_haute) AS ecart_type_sans_aberrantes
+    FROM lignes_avec_bornes
+    GROUP BY sous_famille, unite, designation
+)
 SELECT
-    sous_famille,
-    unite,
-    coalesce(designation_canonique, designation) AS designation,
-    count(*)                       AS nb_occurrences,
-    avg(prix_unitaire)             AS prix_moyen,
-    stddev_samp(prix_unitaire)     AS ecart_type,
-    min(prix_unitaire)             AS prix_min,
-    max(prix_unitaire)             AS prix_max
-FROM price_lines
-GROUP BY sous_famille, unite, coalesce(designation_canonique, designation);
+    a.sous_famille,
+    a.unite,
+    a.designation,
+    a.nb_occurrences,
+    a.prix_moyen,
+    a.ecart_type,
+    a.prix_min,
+    a.prix_max,
+    coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0)                        AS coefficient_variation,
+    a.q1,
+    a.q3,
+    a.borne_basse,
+    a.borne_haute,
+    a.nb_valeurs_aberrantes,
+    (coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
+        AND a.nb_valeurs_aberrantes > 0)                                             AS anomalie_detectee,
+    CASE
+        WHEN coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
+             AND a.nb_valeurs_aberrantes > 0
+        THEN a.prix_moyen_sans_aberrantes
+        ELSE a.prix_moyen
+    END AS prix_moyen_corrige,
+    CASE
+        WHEN coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
+             AND a.nb_valeurs_aberrantes > 0
+        THEN a.ecart_type_sans_aberrantes
+        ELSE a.ecart_type
+    END AS ecart_type_corrige
+FROM agrege a
+CROSS JOIN parametres p;
