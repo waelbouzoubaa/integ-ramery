@@ -13,6 +13,14 @@ RÈGLES DE SÉLECTION
    - Ignore le texte de mise en page qui réapparaît au milieu du tableau à cause
      des sauts de page (mentions légales, en-tête de colonnes répété, "Aucune
      modification de cette pièce...", etc.) — ce n'est pas une ligne de données.
+   - Piège frequent lie aux sauts de page : un titre de regroupement (ex: "J.23
+     Fourniture et pose de panneau A3 pour aire de jeux") se retrouve seul en
+     bas de page, sans prix visible a cote de lui, et ses enfants prixes (ex:
+     "J.23.a", "J.23.b") n'apparaissent qu'au debut de la page suivante. Ne
+     l'extrais JAMAIS comme une ligne a part avec un prix a 0 ou invente : ce
+     titre doit continuer a servir de `chapitre`/`sous_famille` courant pour
+     les lignes suivantes, exactement comme s'il n'y avait pas eu de saut de
+     page entre lui et ses enfants.
 
 2. La numérotation change de convention d'un document à l'autre, et parfois
    d'une section à l'autre dans le MÊME document :
