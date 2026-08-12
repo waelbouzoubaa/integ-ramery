@@ -80,7 +80,7 @@ groupes_df = pd.read_sql(
     JOIN price_lines pl
       ON coalesce(pl.designation_canonique, pl.designation) = g.designation_canonique
      AND pl.sous_famille IS NOT DISTINCT FROM g.sous_famille
-     AND pl.unite IS NOT DISTINCT FROM g.unite
+     AND pl.unite_canonique IS NOT DISTINCT FROM g.unite
     GROUP BY g.id, g.designation_canonique, g.sous_famille, g.unite, g.valide, g.seuil_confiance
     ORDER BY g.valide ASC, nb_en_attente DESC, nb_membres DESC
     """,
@@ -134,7 +134,7 @@ membres_df = pd.read_sql(
     JOIN price_documents pd ON pd.id = pl.document_id
     WHERE coalesce(pl.designation_canonique, pl.designation) = %s
       AND pl.sous_famille IS NOT DISTINCT FROM %s
-      AND pl.unite IS NOT DISTINCT FROM %s
+      AND pl.unite_canonique IS NOT DISTINCT FROM %s
     ORDER BY pl.en_attente DESC, pl.prix_unitaire
     """,
     conn,
@@ -182,7 +182,7 @@ with col_valider:
                 SET fusion_manuelle = true, en_attente = false
                 WHERE coalesce(designation_canonique, designation) = %s
                   AND sous_famille IS NOT DISTINCT FROM %s
-                  AND unite IS NOT DISTINCT FROM %s
+                  AND unite_canonique IS NOT DISTINCT FROM %s
                 """,
                 (canon, sf, u),
             )

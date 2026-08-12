@@ -120,7 +120,7 @@ if not df.empty:
         JOIN price_documents pd ON pd.id = pl.document_id
         WHERE coalesce(pl.designation_canonique, pl.designation) = %s
           AND pl.sous_famille IS NOT DISTINCT FROM %s
-          AND pl.unite IS NOT DISTINCT FROM %s
+          AND pl.unite_canonique IS NOT DISTINCT FROM %s
         ORDER BY pl.prix_unitaire
     """
     detail_df = pd.read_sql(detail_query, conn, params=(designation_choisie, sous_famille_choisie, unite_choisie))

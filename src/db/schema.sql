@@ -3,6 +3,24 @@
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+-- Normalise une unite pour qu'elle serve de cle de regroupement fiable :
+-- minuscules, accents et exposants retires (m2/M2/m² -> "m2"), ponctuation
+-- et espaces retires (FT / ft / F.T. -> "ft"). Sans ca, la meme unite
+-- ecrite differemment d'un document a l'autre coupe silencieusement des
+-- groupes qui devraient etre fusionnes (le meme produit au meme "m2" perd
+-- une partie de ses occurrences juste parce qu'un PDF ecrit "M2").
+-- IMMUTABLE : requis pour l'utiliser dans une colonne generee (voir plus bas).
+CREATE OR REPLACE FUNCTION normaliser_unite(u text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT NULLIF(
+        regexp_replace(
+            translate(lower(trim(u)), 'àâäéèêëîïôöùûüç²³', 'aaaeeeeiioouuuc23'),
+            '[^a-z0-9]', '', 'g'
+        ),
+        ''
+    )
+$$;
+
 CREATE TABLE IF NOT EXISTS price_documents (
     id          bigserial PRIMARY KEY,
     filename    text        NOT NULL UNIQUE,
@@ -32,6 +50,13 @@ ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS designation_canonique text;
 -- Regroupement de "quasi-doublons" (pluriel, boilerplate, quasi-synonymes).
 -- NULL tant que la fusion n'a pas tourne ; la vue retombe sur designation
 -- brute en attendant (voir fusion_designations.py).
+
+ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS unite_canonique text
+    GENERATED ALWAYS AS (normaliser_unite(unite)) STORED;
+-- Version normalisee de `unite`, calculee automatiquement (jamais ecrite a
+-- la main) : c'est elle qui sert de cle de regroupement partout (vue,
+-- fusion_designations.py, table groupes), jamais `unite` brute. `unite`
+-- brute reste affichee telle quelle pour la tracabilite.
 
 ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS fusion_manuelle boolean NOT NULL DEFAULT false;
 -- Un humain a decide explicitement l'appartenance (groupe) de cette ligne
@@ -113,7 +138,9 @@ INSERT INTO parametres (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 --   400" - prix reels differents.
 -- - unite : le meme texte facture au ml dans un document et au m2 dans un
 --   autre n'est pas le meme prix comparable (base de calcul differente) -
---   ne jamais les moyenner ensemble.
+--   ne jamais les moyenner ensemble. On groupe par unite_canonique (voir
+--   normaliser_unite) et non par unite brute : "m2"/"M2"/"m²" ou "ft"/"FT"
+--   sont la meme unite ecrite differemment, jamais des unites differentes.
 -- Ne jamais retirer l'un ou l'autre de ce GROUP BY.
 -- designation_canonique vaut NULL tant que la fusion n'a pas tourne ; la vue
 -- utilise designation brute en attendant (COALESCE).
@@ -158,12 +185,12 @@ WITH quartiles AS (
     -- rejoindre ce resultat aux lignes brutes (etape suivante).
     SELECT
         sous_famille,
-        unite,
+        unite_canonique,
         coalesce(designation_canonique, designation) AS designation,
         percentile_cont(0.25) WITHIN GROUP (ORDER BY prix_unitaire) AS q1,
         percentile_cont(0.75) WITHIN GROUP (ORDER BY prix_unitaire) AS q3
     FROM price_lines
-    GROUP BY sous_famille, unite, coalesce(designation_canonique, designation)
+    GROUP BY sous_famille, unite_canonique, coalesce(designation_canonique, designation)
 ),
 bornes AS (
     SELECT
@@ -176,7 +203,7 @@ bornes AS (
 lignes_avec_bornes AS (
     SELECT
         pl.sous_famille,
-        pl.unite,
+        pl.unite_canonique,
         coalesce(pl.designation_canonique, pl.designation) AS designation,
         pl.prix_unitaire,
         b.q1, b.q3, b.borne_basse, b.borne_haute
@@ -184,12 +211,12 @@ lignes_avec_bornes AS (
     JOIN bornes b
       ON coalesce(pl.designation_canonique, pl.designation) = b.designation
      AND pl.sous_famille IS NOT DISTINCT FROM b.sous_famille
-     AND pl.unite IS NOT DISTINCT FROM b.unite
+     AND pl.unite_canonique IS NOT DISTINCT FROM b.unite_canonique
 ),
 agrege AS (
     SELECT
         sous_famille,
-        unite,
+        unite_canonique AS unite,
         designation,
         count(*)                                                                              AS nb_occurrences,
         avg(prix_unitaire)                                                                     AS prix_moyen,
@@ -204,7 +231,7 @@ agrege AS (
         avg(prix_unitaire) FILTER (WHERE prix_unitaire BETWEEN borne_basse AND borne_haute)     AS prix_moyen_sans_aberrantes,
         stddev_samp(prix_unitaire) FILTER (WHERE prix_unitaire BETWEEN borne_basse AND borne_haute) AS ecart_type_sans_aberrantes
     FROM lignes_avec_bornes
-    GROUP BY sous_famille, unite, designation
+    GROUP BY sous_famille, unite_canonique, designation
 )
 SELECT
     a.sous_famille,

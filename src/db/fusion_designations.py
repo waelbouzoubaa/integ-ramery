@@ -9,7 +9,9 @@ designation seule :
   sous "classe 250" vs "classe 400").
 - unite (U/ml/m2/m3...) : le meme texte facture au ml dans un document et
   au m2 dans un autre n'est pas un prix comparable (base de calcul
-  differente) - ne jamais fusionner deux unites differentes.
+  differente) - ne jamais fusionner deux unites differentes. On compare
+  toujours unite_canonique (colonne generee, voir schema.sql), jamais
+  unite brute : "m2"/"M2"/"m²" ou "ft"/"FT" sont la meme unite.
 
 Deux niveaux :
 - normalisation exacte (regex) -> fusion automatique, deterministe, zero risque
@@ -129,11 +131,17 @@ def get_conn():
     return psycopg.connect(pgurl)
 
 
+_ACCENTS = str.maketrans("àâäéèêëîïôöùûüç", "aaaeeeeiioouuuc")
+
+
 def normaliser(designation: str) -> str:
     d = designation.lower().strip()
     d = re.sub(r"\s+", " ", d)
     d = re.sub(r"^(suivant|selon)\s+d[ée]finition\s+du\s+prix.*?:\s*", "", d)
     d = re.sub(r"^ce prix r[ée]mun[èe]re\s*:?\s*", "", d)
+    d = d.translate(_ACCENTS)
+    d = re.sub(r"[^\w\s]", " ", d)  # ponctuation -> espace (garde les mots separes)
+    d = re.sub(r"\s+", " ", d)
     return d.strip()
 
 
@@ -208,7 +216,7 @@ def matcher_contre_groupes_valides(conn) -> int:
             SELECT DISTINCT ON (o.sous_famille, o.unite, o.designation)
                    o.sous_famille, o.unite, o.designation, g.designation_canonique
             FROM (
-                SELECT DISTINCT sous_famille, unite, designation
+                SELECT DISTINCT sous_famille, unite_canonique AS unite, designation
                 FROM price_lines
                 WHERE designation_canonique IS NULL
             ) o
@@ -242,7 +250,7 @@ def matcher_contre_groupes_valides(conn) -> int:
                 SET designation_canonique = %s, en_attente = true
                 WHERE designation = %s
                   AND sous_famille IS NOT DISTINCT FROM %s
-                  AND unite IS NOT DISTINCT FROM %s
+                  AND unite_canonique IS NOT DISTINCT FROM %s
                   AND fusion_manuelle = false
                 """,
                 (canon, d, sf, u),
@@ -261,16 +269,16 @@ def main():
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT sous_famille, unite, designation, count(*)
+            SELECT sous_famille, unite_canonique AS unite, designation, count(*)
             FROM price_lines pl
             WHERE NOT EXISTS (
                 SELECT 1 FROM groupes g
                 WHERE g.valide = true
                   AND g.designation_canonique = pl.designation_canonique
                   AND g.sous_famille IS NOT DISTINCT FROM pl.sous_famille
-                  AND g.unite IS NOT DISTINCT FROM pl.unite
+                  AND g.unite IS NOT DISTINCT FROM pl.unite_canonique
             )
-            GROUP BY sous_famille, unite, designation
+            GROUP BY sous_famille, unite_canonique, designation
             """
         )
         occurrences = {(sf, u, d): n for sf, u, d, n in cur.fetchall()}
@@ -425,7 +433,7 @@ def main():
                 SET designation_canonique = %s
                 WHERE designation = %s
                   AND sous_famille IS NOT DISTINCT FROM %s
-                  AND unite IS NOT DISTINCT FROM %s
+                  AND unite_canonique IS NOT DISTINCT FROM %s
                   AND fusion_manuelle = false
                 """,
                 [(canon, d, sf, u) for sf, u, d in membres],
