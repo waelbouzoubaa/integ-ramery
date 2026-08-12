@@ -3,6 +3,22 @@
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
+-- Normalise un texte pour la recherche (pas pour le regroupement) : accents
+-- et casse retires, espaces multiples/en trop reduits a un seul. Sert a
+-- comparer le texte tape par l'utilisateur a la designation en base sans
+-- rater un resultat a cause d'un accent absent ou d'un espace en trop
+-- (bug remonte : chercher "deviation" ne trouvait pas "déviation").
+-- Volontairement distincte de normaliser_unite : ici on garde la ponctuation
+-- (utile pour retrouver un texte tel quel), on ne fait que lisser accents/
+-- espaces/casse.
+CREATE OR REPLACE FUNCTION normaliser_recherche(t text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT regexp_replace(
+        translate(lower(trim(t)), 'àâäéèêëîïôöùûüç', 'aaaeeeeiioouuuc'),
+        '\s+', ' ', 'g'
+    )
+$$;
+
 -- Normalise une unite pour qu'elle serve de cle de regroupement fiable :
 -- minuscules, accents et exposants retires (m2/M2/m² -> "m2"), ponctuation
 -- et espaces retires (FT / ft / F.T. -> "ft"). Sans ca, la meme unite

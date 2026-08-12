@@ -59,7 +59,7 @@ with st.expander("⚙️ Paramètres de détection des anomalies de prix"):
         st.success("Seuil mis à jour.")
         st.rerun()
 
-recherche = st.text_input("Rechercher une désignation (recherche partielle)")
+recherche = st.text_input("Rechercher une désignation (recherche partielle) ou un prix")
 
 query = """
     SELECT sous_famille, unite, designation, nb_occurrences,
@@ -70,8 +70,23 @@ query = """
 """
 params: tuple = ()
 if recherche:
-    query += " WHERE designation ILIKE %s"
-    params = (f"%{recherche}%",)
+    # Si le texte tape est un nombre, on cherche un PRIX (utile pour
+    # retrouver a quelle designation appartient une valeur vue dans un PDF).
+    # Sinon, recherche textuelle sur la designation, normalisee (accents/
+    # espaces/casse) des deux cotes pour ne pas rater un resultat a cause
+    # d'un accent absent (bug remonte : "deviation" ne trouvait pas
+    # "déviation").
+    prix_recherche = None
+    try:
+        prix_recherche = float(recherche.strip().replace(",", ".").replace(" ", ""))
+    except ValueError:
+        pass
+    if prix_recherche is not None:
+        query += " WHERE %s BETWEEN prix_min AND prix_max"
+        params = (prix_recherche,)
+    else:
+        query += " WHERE normaliser_recherche(designation) ILIKE '%%' || normaliser_recherche(%s) || '%%'"
+        params = (recherche,)
 query += " ORDER BY nb_occurrences DESC"
 
 df = pd.read_sql(query, conn, params=params)
@@ -114,7 +129,8 @@ if not df.empty:
     anomalie = bool(ligne["anomalie_detectee"])
 
     detail_query = """
-        SELECT pd.filename AS document, pl.chapitre, pl.sous_famille,
+        SELECT pd.filename AS document, pl.designation AS designation_brute,
+               pl.chapitre, pl.sous_famille,
                pl.unite, pl.quantite, pl.prix_unitaire, pl.montant_ht
         FROM price_lines pl
         JOIN price_documents pd ON pd.id = pl.document_id
@@ -144,4 +160,19 @@ if not df.empty:
                 lambda p: "❌ Exclue (aberrante)" if (p < borne_basse or p > borne_haute) else "✅ Retenue"
             )
 
-    st.dataframe(detail_df, use_container_width=True, hide_index=True)
+    st.dataframe(
+        detail_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "document": "Document",
+            "designation_brute": "Désignation (telle qu'écrite dans le PDF)",
+            "chapitre": "Chapitre",
+            "sous_famille": "Sous-famille",
+            "unite": "Unité",
+            "quantite": st.column_config.NumberColumn("Quantité", format="%.2f"),
+            "prix_unitaire": st.column_config.NumberColumn("Prix unitaire (€)", format="%.2f"),
+            "montant_ht": st.column_config.NumberColumn("Montant HT (€)", format="%.2f"),
+            "statut": "Statut",
+        },
+    )
