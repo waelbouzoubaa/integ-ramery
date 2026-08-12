@@ -121,17 +121,25 @@ INSERT INTO parametres (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 -- DETECTION ET CORRECTION DES VALEURS ABERRANTES (anomalies de prix) :
 -- Methode IQR (interquartile range), en un seul passage (pas d'iteration) :
 -- pour chaque groupe, on calcule Q1 (25e percentile) et Q3 (75e percentile)
--- des prix unitaires, puis l'intervalle "normal" = [Q1 - 1.5*IQR, Q3 + 1.5*IQR]
--- avec IQR = Q3 - Q1. Toute valeur hors de cet intervalle est exclue du
--- calcul de la moyenne corrigee.
--- Une anomalie n'est signalee (anomalie_detectee = true) que si LES DEUX
+-- des prix unitaires, puis l'intervalle "normal" = [Q1 - 3*IQR, Q3 + 3*IQR]
+-- avec IQR = Q3 - Q1. Le multiplicateur 3 (au lieu du 1.5 statistique "standard")
+-- est volontaire : sur de petits echantillons, 1.5*IQR marque comme aberrantes
+-- des valeurs qui different seulement de quelques centimes (cas reel observe :
+-- 1.06 a 1.43 EUR/ml sur 5 lignes), ce qui n'a pas de sens metier. 3*IQR reste
+-- assez large pour ignorer ces petites variations normales entre tranches/lots,
+-- tout en detectant toujours les vrais cas extremes (ex. 14757.9 EUR au milieu
+-- de valeurs entre 1000 et 3600 EUR). Toute valeur hors de cet intervalle est
+-- exclue du calcul de la moyenne corrigee.
+-- Une anomalie n'est signalee (anomalie_detectee = true) que si LES TROIS
 -- conditions sont vraies :
---   1. le coefficient de variation brut (ecart-type / moyenne, en %) depasse
+--   1. au moins 3 occurrences (nb_occurrences >= 3) - en dessous, les quartiles
+--      n'ont pas de sens statistique fiable (trop peu de points) ;
+--   2. le coefficient de variation brut (ecart-type / moyenne, en %) depasse
 --      le seuil configurable de la table parametres (defaut 5%) - le CV est
 --      utilise plutot qu'un ecart-type absolu en euros pour rester coherent
 --      quelle que soit l'echelle de prix du produit (un ecart de 500 EUR est
 --      enorme sur un prix a 10 EUR, negligeable sur un prix a 10 000 EUR) ;
---   2. la methode IQR identifie au moins une valeur reellement hors norme
+--   3. la methode IQR identifie au moins une valeur reellement hors norme
 --      pour l'expliquer (nb_valeurs_aberrantes > 0).
 -- prix_moyen_corrige / ecart_type_corrige valent la moyenne/ecart-type
 -- recalcules SANS les valeurs aberrantes quand anomalie_detectee est vrai,
@@ -161,8 +169,8 @@ bornes AS (
     SELECT
         *,
         (q3 - q1)             AS iqr,
-        q1 - 1.5 * (q3 - q1)  AS borne_basse,
-        q3 + 1.5 * (q3 - q1)  AS borne_haute
+        q1 - 3 * (q3 - q1)    AS borne_basse,
+        q3 + 3 * (q3 - q1)    AS borne_haute
     FROM quartiles
 ),
 lignes_avec_bornes AS (
@@ -213,16 +221,19 @@ SELECT
     a.borne_basse,
     a.borne_haute,
     a.nb_valeurs_aberrantes,
-    (coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
+    (a.nb_occurrences >= 3
+        AND coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
         AND a.nb_valeurs_aberrantes > 0)                                             AS anomalie_detectee,
     CASE
-        WHEN coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
+        WHEN a.nb_occurrences >= 3
+             AND coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
              AND a.nb_valeurs_aberrantes > 0
         THEN a.prix_moyen_sans_aberrantes
         ELSE a.prix_moyen
     END AS prix_moyen_corrige,
     CASE
-        WHEN coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
+        WHEN a.nb_occurrences >= 3
+             AND coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
              AND a.nb_valeurs_aberrantes > 0
         THEN a.ecart_type_sans_aberrantes
         ELSE a.ecart_type
