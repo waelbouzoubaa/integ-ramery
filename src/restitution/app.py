@@ -80,7 +80,7 @@ df["designation_affichee"] = df["designation"] + df["anomalie_detectee"].apply(l
 st.dataframe(
     df[[
         "sous_famille", "unite", "designation_affichee", "nb_occurrences",
-        "prix_moyen_corrige", "ecart_type_corrige", "coefficient_variation",
+        "prix_moyen_corrige", "ecart_type_corrige",
         "prix_min", "prix_max",
     ]],
     use_container_width=True,
@@ -92,7 +92,6 @@ st.dataframe(
         "nb_occurrences": "Occurrences",
         "prix_moyen_corrige": st.column_config.NumberColumn("Prix moyen (€)", format="%.2f"),
         "ecart_type_corrige": st.column_config.NumberColumn("Écart-type", format="%.2f"),
-        "coefficient_variation": st.column_config.NumberColumn("CV brut (%)", format="%.1f"),
         "prix_min": st.column_config.NumberColumn("Min (€)", format="%.2f"),
         "prix_max": st.column_config.NumberColumn("Max (€)", format="%.2f"),
     },
