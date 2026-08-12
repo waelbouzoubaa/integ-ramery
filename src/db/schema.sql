@@ -9,18 +9,22 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- ecrite differemment d'un document a l'autre coupe silencieusement des
 -- groupes qui devraient etre fusionnes (le meme produit au meme "m2" perd
 -- une partie de ses occurrences juste parce qu'un PDF ecrit "M2").
--- Le "/" est volontairement CONSERVE (jamais retire comme le reste de la
--- ponctuation) : des unites fractionnaires existent reellement dans ce
--- metier ("1/2 J" = demi-journee). Le retirer transformerait "1/2 J" en
--- "12j" (douze jours) - bug reel constate, un demi-journee n'a rien a voir
--- avec douze jours.
+-- Le "/" et le "%" sont volontairement CONSERVES (jamais retires comme le
+-- reste de la ponctuation) : ce sont des unites a part entiere dans ce
+-- metier, pas de la simple ponctuation decorative.
+-- - "/" : unites fractionnaires ("1/2 J" = demi-journee). Le retirer
+--   transformerait "1/2 J" en "12j" (douze jours) - bug reel constate.
+-- - "%" : unite "pourcentage" a elle seule (ex: "Moins-value pour chantier
+--   en route barree", exprimee en % du prix de base). Le retirer laisse une
+--   chaine vide -> NULL, ce qui merge silencieusement ces lignes avec
+--   toutes celles qui n'ont VRAIMENT aucune unite - bug reel constate.
 -- IMMUTABLE : requis pour l'utiliser dans une colonne generee (voir plus bas).
 CREATE OR REPLACE FUNCTION normaliser_unite(u text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
     SELECT NULLIF(
         regexp_replace(
             translate(lower(trim(u)), 'àâäéèêëîïôöùûüç²³', 'aaaeeeeiioouuuc23'),
-            '[^a-z0-9/]', '', 'g'
+            '[^a-z0-9/%]', '', 'g'
         ),
         ''
     )
