@@ -157,6 +157,15 @@ CREATE TABLE IF NOT EXISTS parametres (
 );
 INSERT INTO parametres (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
+ALTER TABLE parametres ADD COLUMN IF NOT EXISTS seuil_auto_validation numeric(3,2) NOT NULL DEFAULT 0.85;
+-- Seuil de confiance (score Gemini sur le groupe, voir evaluer_confiance_groupe
+-- dans fusion_designations.py) au-dela duquel un groupe de designations est
+-- valide automatiquement (valide=true), sans attendre un clic humain dans
+-- "Revue des groupes". Demande explicite : la revue manuelle systematique
+-- de groupes evidents (score 1.0, simple faute de frappe ou point final en
+-- trop) n'apporte rien et decourage l'usage - seuls les groupes ambigus
+-- (score bas) doivent remonter a un humain. Ajustable comme seuil_cv_anomalie.
+
 -- Vue de travail : moyenne de prix par (sous_famille, unite, designation
 -- canonique). sous_famille ET unite font partie de la cle :
 -- - sous_famille : "avec grille fonte 100 mm" sous "classe 250" vs "classe

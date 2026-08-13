@@ -264,6 +264,11 @@ def matcher_contre_groupes_valides(conn) -> int:
 def main():
     conn = get_conn()
 
+    with conn.cursor() as cur:
+        cur.execute("SELECT seuil_auto_validation FROM parametres WHERE id = 1")
+        seuil_auto_validation = float(cur.fetchone()[0])
+    print(f"Seuil d'auto-validation : {seuil_auto_validation:.2f}")
+
     matcher_contre_groupes_valides(conn)
 
     with conn.cursor() as cur:
@@ -381,6 +386,7 @@ def main():
     client = None
     nb_evalues = 0
     nb_caches = 0
+    nb_auto_valides = 0
 
     with conn.cursor() as cur:
         for membres in a_fusionner.values():
@@ -401,6 +407,7 @@ def main():
             existant = cur.fetchone()
             deja_valide = existant is not None and existant[0]
             composition_inchangee = existant is not None and existant[1] == signature
+            auto_valide = False
 
             if deja_valide or composition_inchangee:
                 # Verrouille par un humain, ou deja evalue pour cette exacte
@@ -411,20 +418,29 @@ def main():
                     client = _get_client()
                 score = evaluer_confiance_groupe(client, sf_groupe, unite_groupe, designations_brutes)
                 nb_evalues += 1
+                auto_valide = score >= seuil_auto_validation
+                if auto_valide:
+                    nb_auto_valides += 1
 
                 # Cree ou met a jour le groupe avec le score de Gemini. Le
                 # WHERE groupes.valide = false protege un groupe deja
                 # verrouille par un humain d'un ecrasement concurrent.
+                # Auto-valide (valide=true) si le score depasse
+                # seuil_auto_validation : evite de faire revoir manuellement
+                # des groupes evidents (faute de frappe, point final en trop)
+                # - seuls les groupes ambigus (score bas) remontent a un humain.
                 cur.execute(
                     """
-                    INSERT INTO groupes (designation_canonique, sous_famille, unite, seuil_confiance, membres_signature)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO groupes (designation_canonique, sous_famille, unite, seuil_confiance, membres_signature, valide, valide_le)
+                    VALUES (%s, %s, %s, %s, %s, %s, CASE WHEN %s THEN now() END)
                     ON CONFLICT (designation_canonique, coalesce(sous_famille, ''), coalesce(unite, ''))
                     DO UPDATE SET seuil_confiance = EXCLUDED.seuil_confiance,
-                                  membres_signature = EXCLUDED.membres_signature
+                                  membres_signature = EXCLUDED.membres_signature,
+                                  valide = EXCLUDED.valide,
+                                  valide_le = EXCLUDED.valide_le
                     WHERE groupes.valide = false
                     """,
-                    (canon, sf_groupe, unite_groupe, score, signature),
+                    (canon, sf_groupe, unite_groupe, score, signature, auto_valide, auto_valide),
                 )
 
             cur.executemany(
@@ -438,8 +454,23 @@ def main():
                 """,
                 [(canon, d, sf, u) for sf, u, d in membres],
             )
+
+            if auto_valide:
+                # Meme effet que le bouton "Valider le groupe" manuel (voir
+                # 1_Revue_des_groupes.py) : verrouille la composition.
+                cur.executemany(
+                    """
+                    UPDATE price_lines
+                    SET fusion_manuelle = true, en_attente = false
+                    WHERE designation = %s
+                      AND sous_famille IS NOT DISTINCT FROM %s
+                      AND unite_canonique IS NOT DISTINCT FROM %s
+                    """,
+                    [(d, sf, u) for sf, u, d in membres],
+                )
     conn.commit()
     print(f"{nb_evalues} groupes evalues par Gemini (nouveaux ou composition modifiee), {nb_caches} inchanges (score conserve)")
+    print(f"{nb_auto_valides} groupes auto-valides (score >= {seuil_auto_validation:.2f})")
     conn.close()
 
 

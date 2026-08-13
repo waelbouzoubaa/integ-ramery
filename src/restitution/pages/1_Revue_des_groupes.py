@@ -50,11 +50,33 @@ st.caption(
     "composition, ou retire une ligne si le regroupement te semble faux."
 )
 
+seuil_auto_actuel = float(
+    pd.read_sql("SELECT seuil_auto_validation FROM parametres WHERE id = 1", conn)["seuil_auto_validation"].iloc[0]
+)
+with st.expander("⚙️ Seuil d'auto-validation des groupes"):
+    st.caption(
+        "Un groupe dont le score de confiance Gemini (voir métrique ci-dessous) "
+        "dépasse ce seuil est validé automatiquement, sans clic humain — pour "
+        "ne pas faire revoir des groupes évidents (faute de frappe, point final "
+        "en trop). En dessous du seuil, la validation reste manuelle."
+    )
+    nouveau_seuil_auto = st.number_input(
+        "Seuil de confiance pour auto-valider (0 à 1)",
+        min_value=0.0, max_value=1.0, value=seuil_auto_actuel, step=0.05,
+    )
+    if st.button("Enregistrer le seuil d'auto-validation"):
+        with conn.cursor() as cur:
+            cur.execute("UPDATE parametres SET seuil_auto_validation = %s WHERE id = 1", (nouveau_seuil_auto,))
+        st.success("Seuil mis à jour. Relance la fusion pour l'appliquer aux prochains groupes.")
+        st.rerun()
+
 st.subheader("Lancer la fusion")
 st.caption(
     "Recalcule les quasi-doublons (normalisation + Gemini) sur toute la base "
     "et rattache les nouvelles désignations aux groupes déjà validés. Les "
-    "paires déjà jugées lors d'un run précédent ne sont pas repayées (cache)."
+    "paires déjà jugées lors d'un run précédent ne sont pas repayées (cache). "
+    "Les groupes dont le score dépasse le seuil ci-dessus sont validés "
+    "automatiquement."
 )
 if st.button("🔄 Lancer la fusion des désignations"):
     sortie = io.StringIO()
