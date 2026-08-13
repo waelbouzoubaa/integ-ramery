@@ -166,6 +166,71 @@ ALTER TABLE parametres ADD COLUMN IF NOT EXISTS seuil_auto_validation numeric(3,
 -- trop) n'apporte rien et decourage l'usage - seuls les groupes ambigus
 -- (score bas) doivent remonter a un humain. Ajustable comme seuil_cv_anomalie.
 
+-- Correction ITERATIVE des valeurs aberrantes (demande client explicite,
+-- transcript reunion : "tu dois te retrouver sur un ecart-type qui est
+-- coherent... apres correction qui soit inferieur ou egal a [seuil]").
+-- Contrairement a un simple passage IQR (qui exclut une fois puis s'arrete
+-- meme si le resultat reste disperse), cette fonction repete la detection
+-- IQR (bornes = [Q1 - 3*IQR, Q3 + 3*IQR], multiplicateur 3 choisi pour ne
+-- pas exclure des ecarts de quelques centimes sur petit echantillon - voir
+-- historique) sur les valeurs RESTANTES, jusqu'a ce que :
+--   1. le coefficient de variation repasse sous le seuil demande (objectif
+--      atteint) ; ou
+--   2. un passage n'exclue plus rien (le groupe reste disperse mais aucune
+--      valeur n'est plus statistiquement hors norme - on arrete, continuer
+--      viderait le groupe sans justification statistique) ; ou
+--   3. il reste moins de 3 valeurs (quartiles plus fiables en dessous).
+-- Retourne toujours q1/q3/bornes du DERNIER passage evalue, meme quand rien
+-- n'est exclu (0 lignes valides -> pas d'anomalie mais bornes affichables).
+-- valeurs_retenues = les prix effectivement gardes a la fin (utile pour
+-- determiner ligne par ligne qui a ete exclu : comparer une valeur aux
+-- bornes du DERNIER passage uniquement serait faux, une valeur exclue tot
+-- peut tomber dans l'intervalle final une fois les extremes retires).
+CREATE OR REPLACE FUNCTION corriger_valeurs_aberrantes(prix numeric[], seuil_cv numeric)
+RETURNS TABLE(
+    moyenne_corrigee   numeric,
+    ecart_type_corrige numeric,
+    nb_exclues         int,
+    q1                 numeric,
+    q3                 numeric,
+    borne_basse        numeric,
+    borne_haute        numeric,
+    valeurs_retenues   numeric[]
+)
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+    restants          numeric[] := prix;
+    nouveaux_restants numeric[];
+    v_q1 numeric; v_q3 numeric; v_iqr numeric; v_bb numeric; v_bh numeric;
+    v_moy numeric; v_ect numeric; v_cv numeric;
+    v_nb_exclu int := 0;
+BEGIN
+    LOOP
+        SELECT avg(x), stddev_samp(x) INTO v_moy, v_ect FROM unnest(restants) x;
+        v_cv := coalesce(v_ect / nullif(v_moy, 0) * 100, 0);
+
+        SELECT percentile_cont(0.25) WITHIN GROUP (ORDER BY x),
+               percentile_cont(0.75) WITHIN GROUP (ORDER BY x)
+          INTO v_q1, v_q3
+          FROM unnest(restants) x;
+        v_iqr := v_q3 - v_q1;
+        v_bb := v_q1 - 3 * v_iqr;
+        v_bh := v_q3 + 3 * v_iqr;
+
+        EXIT WHEN v_cv <= seuil_cv OR array_length(restants, 1) < 3;
+
+        SELECT array_agg(x) INTO nouveaux_restants FROM unnest(restants) x WHERE x BETWEEN v_bb AND v_bh;
+
+        EXIT WHEN array_length(nouveaux_restants, 1) = array_length(restants, 1);
+
+        v_nb_exclu := v_nb_exclu + (array_length(restants, 1) - array_length(nouveaux_restants, 1));
+        restants := nouveaux_restants;
+    END LOOP;
+
+    RETURN QUERY SELECT v_moy, v_ect, v_nb_exclu, v_q1, v_q3, v_bb, v_bh, restants;
+END;
+$$;
+
 -- Vue de travail : moyenne de prix par (sous_famille, unite, designation
 -- canonique). sous_famille ET unite font partie de la cle :
 -- - sous_famille : "avec grille fonte 100 mm" sous "classe 250" vs "classe
@@ -179,93 +244,36 @@ ALTER TABLE parametres ADD COLUMN IF NOT EXISTS seuil_auto_validation numeric(3,
 -- designation_canonique vaut NULL tant que la fusion n'a pas tourne ; la vue
 -- utilise designation brute en attendant (COALESCE).
 --
--- DETECTION ET CORRECTION DES VALEURS ABERRANTES (anomalies de prix) :
--- Methode IQR (interquartile range), en un seul passage (pas d'iteration) :
--- pour chaque groupe, on calcule Q1 (25e percentile) et Q3 (75e percentile)
--- des prix unitaires, puis l'intervalle "normal" = [Q1 - 3*IQR, Q3 + 3*IQR]
--- avec IQR = Q3 - Q1. Le multiplicateur 3 (au lieu du 1.5 statistique "standard")
--- est volontaire : sur de petits echantillons, 1.5*IQR marque comme aberrantes
--- des valeurs qui different seulement de quelques centimes (cas reel observe :
--- 1.06 a 1.43 EUR/ml sur 5 lignes), ce qui n'a pas de sens metier. 3*IQR reste
--- assez large pour ignorer ces petites variations normales entre tranches/lots,
--- tout en detectant toujours les vrais cas extremes (ex. 14757.9 EUR au milieu
--- de valeurs entre 1000 et 3600 EUR). Toute valeur hors de cet intervalle est
--- exclue du calcul de la moyenne corrigee.
--- Une anomalie n'est signalee (anomalie_detectee = true) que si LES TROIS
--- conditions sont vraies :
---   1. au moins 3 occurrences (nb_occurrences >= 3) - en dessous, les quartiles
---      n'ont pas de sens statistique fiable (trop peu de points) ;
---   2. le coefficient de variation brut (ecart-type / moyenne, en %) depasse
---      le seuil configurable de la table parametres (defaut 5%) - le CV est
---      utilise plutot qu'un ecart-type absolu en euros pour rester coherent
---      quelle que soit l'echelle de prix du produit (un ecart de 500 EUR est
---      enorme sur un prix a 10 EUR, negligeable sur un prix a 10 000 EUR) ;
---   3. la methode IQR identifie au moins une valeur reellement hors norme
---      pour l'expliquer (nb_valeurs_aberrantes > 0).
+-- DETECTION ET CORRECTION DES VALEURS ABERRANTES : voir corriger_valeurs_
+-- aberrantes ci-dessus pour l'algorithme iteratif. anomalie_detectee est
+-- vrai des que la fonction a exclu au moins une valeur (nb_valeurs_
+-- aberrantes > 0) - la garde "nb_occurrences >= 3" est deja assuree en
+-- interne par la fonction (elle n'exclut jamais rien en dessous de 3
+-- valeurs restantes), pas besoin de la repeter ici.
 -- prix_moyen_corrige / ecart_type_corrige valent la moyenne/ecart-type
--- recalcules SANS les valeurs aberrantes quand anomalie_detectee est vrai,
+-- APRES la correction iterative complete quand anomalie_detectee est vrai,
 -- sinon ils sont identiques a prix_moyen / ecart_type (rien de corrige).
--- Le detail (bornes IQR, valeurs exclues) reste consultable via les
--- colonnes q1/q3/borne_basse/borne_haute et via la table price_lines
--- elle-meme (aucune donnee brute n'est jamais supprimee ou modifiee).
+-- Le detail (bornes du dernier passage, valeurs exclues) reste consultable
+-- via q1/q3/borne_basse/borne_haute et via price_lines elle-meme (aucune
+-- donnee brute n'est jamais supprimee ou modifiee).
 --
 -- DROP necessaire : CREATE OR REPLACE ne permet pas de changer l'ordre des
 -- colonnes d'une vue existante (ici on insere sous_famille en 1ere position).
 DROP VIEW IF EXISTS prix_moyen_par_designation;
 CREATE VIEW prix_moyen_par_designation AS
-WITH quartiles AS (
-    -- percentile_cont est un agregat "ordered-set" : Postgres ne l'autorise
-    -- pas avec OVER (fenetre), il faut passer par un GROUP BY classique puis
-    -- rejoindre ce resultat aux lignes brutes (etape suivante).
-    SELECT
-        sous_famille,
-        unite_canonique,
-        coalesce(designation_canonique, designation) AS designation,
-        percentile_cont(0.25) WITHIN GROUP (ORDER BY prix_unitaire) AS q1,
-        percentile_cont(0.75) WITHIN GROUP (ORDER BY prix_unitaire) AS q3
-    FROM price_lines
-    GROUP BY sous_famille, unite_canonique, coalesce(designation_canonique, designation)
-),
-bornes AS (
-    SELECT
-        *,
-        (q3 - q1)             AS iqr,
-        q1 - 3 * (q3 - q1)    AS borne_basse,
-        q3 + 3 * (q3 - q1)    AS borne_haute
-    FROM quartiles
-),
-lignes_avec_bornes AS (
-    SELECT
-        pl.sous_famille,
-        pl.unite_canonique,
-        coalesce(pl.designation_canonique, pl.designation) AS designation,
-        pl.prix_unitaire,
-        b.q1, b.q3, b.borne_basse, b.borne_haute
-    FROM price_lines pl
-    JOIN bornes b
-      ON coalesce(pl.designation_canonique, pl.designation) = b.designation
-     AND pl.sous_famille IS NOT DISTINCT FROM b.sous_famille
-     AND pl.unite_canonique IS NOT DISTINCT FROM b.unite_canonique
-),
-agrege AS (
+WITH agrege AS (
     SELECT
         sous_famille,
         unite_canonique AS unite,
-        designation,
-        count(*)                                                                              AS nb_occurrences,
-        avg(prix_unitaire)                                                                     AS prix_moyen,
-        stddev_samp(prix_unitaire)                                                             AS ecart_type,
-        min(prix_unitaire)                                                                     AS prix_min,
-        max(prix_unitaire)                                                                     AS prix_max,
-        min(q1)                                                                                AS q1,
-        min(q3)                                                                                AS q3,
-        min(borne_basse)                                                                       AS borne_basse,
-        min(borne_haute)                                                                       AS borne_haute,
-        count(*) FILTER (WHERE prix_unitaire < borne_basse OR prix_unitaire > borne_haute)      AS nb_valeurs_aberrantes,
-        avg(prix_unitaire) FILTER (WHERE prix_unitaire BETWEEN borne_basse AND borne_haute)     AS prix_moyen_sans_aberrantes,
-        stddev_samp(prix_unitaire) FILTER (WHERE prix_unitaire BETWEEN borne_basse AND borne_haute) AS ecart_type_sans_aberrantes
-    FROM lignes_avec_bornes
-    GROUP BY sous_famille, unite_canonique, designation
+        coalesce(designation_canonique, designation) AS designation,
+        count(*)                    AS nb_occurrences,
+        avg(prix_unitaire)          AS prix_moyen,
+        stddev_samp(prix_unitaire)  AS ecart_type,
+        min(prix_unitaire)          AS prix_min,
+        max(prix_unitaire)          AS prix_max,
+        array_agg(prix_unitaire)    AS prix_liste
+    FROM price_lines
+    GROUP BY sous_famille, unite_canonique, coalesce(designation_canonique, designation)
 )
 SELECT
     a.sous_famille,
@@ -276,28 +284,16 @@ SELECT
     a.ecart_type,
     a.prix_min,
     a.prix_max,
-    coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0)                        AS coefficient_variation,
-    a.q1,
-    a.q3,
-    a.borne_basse,
-    a.borne_haute,
-    a.nb_valeurs_aberrantes,
-    (a.nb_occurrences >= 3
-        AND coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
-        AND a.nb_valeurs_aberrantes > 0)                                             AS anomalie_detectee,
-    CASE
-        WHEN a.nb_occurrences >= 3
-             AND coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
-             AND a.nb_valeurs_aberrantes > 0
-        THEN a.prix_moyen_sans_aberrantes
-        ELSE a.prix_moyen
-    END AS prix_moyen_corrige,
-    CASE
-        WHEN a.nb_occurrences >= 3
-             AND coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) > p.seuil_cv_anomalie
-             AND a.nb_valeurs_aberrantes > 0
-        THEN a.ecart_type_sans_aberrantes
-        ELSE a.ecart_type
-    END AS ecart_type_corrige
+    coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) AS coefficient_variation,
+    c.q1,
+    c.q3,
+    c.borne_basse,
+    c.borne_haute,
+    c.nb_exclues                                              AS nb_valeurs_aberrantes,
+    (c.nb_exclues > 0)                                        AS anomalie_detectee,
+    CASE WHEN c.nb_exclues > 0 THEN c.moyenne_corrigee   ELSE a.prix_moyen END AS prix_moyen_corrige,
+    CASE WHEN c.nb_exclues > 0 THEN c.ecart_type_corrige ELSE a.ecart_type END AS ecart_type_corrige,
+    c.valeurs_retenues
 FROM agrege a
-CROSS JOIN parametres p;
+CROSS JOIN parametres p
+CROSS JOIN LATERAL corriger_valeurs_aberrantes(a.prix_liste, p.seuil_cv_anomalie) c;

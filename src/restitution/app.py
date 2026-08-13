@@ -1,4 +1,5 @@
 import os
+from collections import Counter
 
 import pandas as pd
 import psycopg
@@ -45,9 +46,11 @@ seuil_actuel = float(pd.read_sql("SELECT seuil_cv_anomalie FROM parametres WHERE
 with st.expander("⚙️ Paramètres de détection des anomalies de prix"):
     st.caption(
         "Si le coefficient de variation (écart-type / prix moyen) d'une désignation "
-        "dépasse ce seuil ET que la méthode IQR identifie au moins une valeur "
-        "vraiment hors norme, la moyenne affichée est corrigée automatiquement "
-        "(valeur aberrante exclue) et marquée d'un astérisque *."
+        "dépasse ce seuil, les valeurs les plus hors norme (méthode IQR) sont "
+        "exclues, puis le calcul est refait — et recommence tant que le résultat "
+        "dépasse encore le seuil, jusqu'à repasser en dessous ou ne plus rien "
+        "trouver à exclure. La moyenne affichée est alors corrigée automatiquement "
+        "et marquée d'un astérisque *."
     )
     nouveau_seuil = st.number_input(
         "Seuil de coefficient de variation (%)",
@@ -65,7 +68,7 @@ query = """
     SELECT sous_famille, unite, designation, nb_occurrences,
            prix_moyen, ecart_type, prix_min, prix_max, coefficient_variation,
            anomalie_detectee, prix_moyen_corrige, ecart_type_corrige,
-           nb_valeurs_aberrantes, q1, q3, borne_basse, borne_haute
+           nb_valeurs_aberrantes, q1, q3, borne_basse, borne_haute, valeurs_retenues
     FROM prix_moyen_par_designation
 """
 params: tuple = ()
@@ -146,19 +149,32 @@ if not df.empty:
         borne_haute = float(ligne["borne_haute"])
         st.warning(
             f"⚠️ Moyenne corrigée automatiquement : {int(ligne['nb_valeurs_aberrantes'])} valeur(s) "
-            f"jugée(s) aberrante(s) (méthode IQR) exclue(s) du calcul.\n\n"
+            f"jugée(s) aberrante(s) (méthode IQR, correction itérative) exclue(s) du calcul.\n\n"
             f"Moyenne brute (toutes les lignes) : **{ligne['prix_moyen']:.2f} €** "
             f"→ moyenne corrigée : **{ligne['prix_moyen_corrige']:.2f} €**"
         )
         with st.expander("Détail du calcul de correction (méthode IQR)"):
             st.write(
-                f"Intervalle de prix considéré comme normal : "
-                f"**[{borne_basse:.2f} € ; {borne_haute:.2f} €]** "
-                f"(calculé à partir du 1er et 3e quartile des prix de cette désignation)."
+                f"Intervalle de prix considéré comme normal au dernier passage "
+                f"(la correction répète l'exclusion tant que l'écart-type reste "
+                f"trop élevé) : **[{borne_basse:.2f} € ; {borne_haute:.2f} €]**."
             )
-            detail_df["statut"] = detail_df["prix_unitaire"].apply(
-                lambda p: "❌ Exclue (aberrante)" if (p < borne_basse or p > borne_haute) else "✅ Retenue"
-            )
+            # Comparer chaque prix aux bornes du DERNIER passage serait faux :
+            # une valeur exclue a un passage precedent peut retomber dans cet
+            # intervalle une fois les extremes retires. On compare plutot a la
+            # liste reelle des valeurs retenues a la fin (Counter pour gerer
+            # les doublons : peu importe QUELLE ligne exacte parmi des prix
+            # identiques est marquee exclue, seul le compte final compte).
+            valeurs_retenues = Counter(float(v) for v in ligne["valeurs_retenues"])
+
+            def _statut(p):
+                p = float(p)
+                if valeurs_retenues[p] > 0:
+                    valeurs_retenues[p] -= 1
+                    return "✅ Retenue"
+                return "❌ Exclue (aberrante)"
+
+            detail_df["statut"] = detail_df["prix_unitaire"].apply(_statut)
 
     st.dataframe(
         detail_df,
