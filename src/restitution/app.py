@@ -94,7 +94,7 @@ df["designation_affichee"] = df["designation"] + df["anomalie_detectee"].apply(l
 
 st.dataframe(
     df[[
-        "sous_famille", "unite", "designation_affichee", "nb_occurrences",
+        "designation_affichee", "sous_famille", "unite", "nb_occurrences",
         "prix_moyen_corrige", "ecart_type_corrige",
         "prix_min", "prix_max",
     ]],
