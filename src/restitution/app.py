@@ -98,7 +98,7 @@ df["designation_affichee"] = df["designation"] + df["anomalie_detectee"].apply(l
 st.dataframe(
     df[[
         "designation_affichee", "sous_famille", "unite", "nb_occurrences",
-        "prix_moyen_corrige", "ecart_type_corrige",
+        "prix_moyen", "prix_moyen_corrige", "ecart_type_corrige",
         "prix_min", "prix_max",
     ]],
     use_container_width=True,
@@ -108,14 +108,15 @@ st.dataframe(
         "unite": "Unité",
         "designation_affichee": "Désignation",
         "nb_occurrences": "Occurrences",
-        "prix_moyen_corrige": st.column_config.NumberColumn("Prix moyen (€)", format="%.2f"),
+        "prix_moyen": st.column_config.NumberColumn("Moyenne brute (€)", format="%.2f"),
+        "prix_moyen_corrige": st.column_config.NumberColumn("Moyenne corrigée (€)", format="%.2f"),
         "ecart_type_corrige": st.column_config.NumberColumn("Écart-type", format="%.2f"),
         "prix_min": st.column_config.NumberColumn("Min (€)", format="%.2f"),
         "prix_max": st.column_config.NumberColumn("Max (€)", format="%.2f"),
     },
 )
 if df["anomalie_detectee"].any():
-    st.caption("* = moyenne corrigée automatiquement (valeur(s) aberrante(s) exclue(s) — détail ci-dessous)")
+    st.caption("* = moyenne corrigée automatiquement (valeur(s) aberrante(s) exclue(s) — détail ci-dessous). Sans anomalie, les 2 colonnes sont identiques.")
 
 st.divider()
 st.subheader("Détail d'une désignation")
