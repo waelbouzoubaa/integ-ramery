@@ -133,9 +133,9 @@ if not df.empty:
     anomalie = bool(ligne["anomalie_detectee"])
 
     detail_query = """
-        SELECT pd.filename AS document, pl.designation AS designation_brute,
-               pl.chapitre, pl.sous_famille,
-               pl.unite, pl.quantite, pl.prix_unitaire, pl.montant_ht
+        SELECT pd.filename AS document, pl.chapitre, pl.sous_famille,
+               pl.unite, pl.quantite, pl.prix_unitaire, pl.montant_ht,
+               pl.designation AS designation_brute
         FROM price_lines pl
         JOIN price_documents pd ON pd.id = pl.document_id
         WHERE coalesce(pl.designation_canonique, pl.designation) = %s
