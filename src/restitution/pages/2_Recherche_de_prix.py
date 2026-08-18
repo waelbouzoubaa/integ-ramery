@@ -16,8 +16,12 @@ load_dotenv()
 EXTRACTION_DIR = Path(__file__).resolve().parents[2] / "extraction"
 if str(EXTRACTION_DIR) not in sys.path:
     sys.path.insert(0, str(EXTRACTION_DIR))
+DB_DIR = Path(__file__).resolve().parents[2] / "db"
+if str(DB_DIR) not in sys.path:
+    sys.path.insert(0, str(DB_DIR))
 
 from gemini_extract import extract_pdf_sans_prix  # noqa: E402
+from fusion_designations import memes_nombres  # noqa: E402
 
 st.set_page_config(page_title="Recherche de prix", page_icon="🔎", layout="wide")
 
@@ -38,7 +42,9 @@ st.caption(
     "Upload un bordereau de prix SANS prix renseignés (DQE/BPU vierge à "
     "compléter, désignations et unités présentes). L'IA extrait chaque "
     "désignation, la rapproche de la base de prix existante par similarité "
-    "de texte, et affiche le prix moyen corrigé correspondant."
+    "de texte (jamais entre deux nombres différents — une profondeur, un "
+    "diamètre ou une classe qui diffère est presque toujours un produit "
+    "différent), et affiche le prix moyen corrigé correspondant."
 )
 
 seuil_correspondance = st.slider(
@@ -64,21 +70,29 @@ if fichier is not None:
     # avoir a batcher en une seule requete geante).
     lignes_resultat = []
     for item in resultat.items:
-        correspondance = pd.read_sql(
+        # Top 5 (pas juste le meilleur score) : la similarite de texte seule
+        # confond des variantes qui ne different que par un nombre (ex.
+        # "Fraisage de 6 a 12 cm" vs "Fraisage de 0 a 6 cm" - meme texte a un
+        # chiffre pres, score eleve, mais probablement des prix differents).
+        # On filtre ensuite avec memes_nombres (meme regle que la fusion des
+        # designations) : un nombre qui differe (profondeur, diametre,
+        # classe...) est presque toujours un produit different dans ce metier.
+        candidats = pd.read_sql(
             """
             SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
                    similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
             FROM prix_moyen_par_designation
             WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
             ORDER BY score DESC
-            LIMIT 1
+            LIMIT 5
             """,
             conn, params=(item.designation, item.unite),
         )
+        candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
 
-        trouve = not correspondance.empty and correspondance.iloc[0]["score"] >= seuil_correspondance
+        trouve = not candidats.empty and candidats.iloc[0]["score"] >= seuil_correspondance
         if trouve:
-            r = correspondance.iloc[0]
+            r = candidats.iloc[0]
             lignes_resultat.append({
                 "designation_bordereau": item.designation,
                 "unite": item.unite,
@@ -90,7 +104,7 @@ if fichier is not None:
             })
         else:
             score_le_plus_proche = (
-                round(float(correspondance.iloc[0]["score"]), 2) if not correspondance.empty else None
+                round(float(candidats.iloc[0]["score"]), 2) if not candidats.empty else None
             )
             lignes_resultat.append({
                 "designation_bordereau": item.designation,
