@@ -14,3 +14,15 @@ class PriceItem(BaseModel):
 
 class ExtractionResult(BaseModel):
     items: list[PriceItem]
+
+
+class DesignationSansPrix(BaseModel):
+    numero: str | None = None
+    chapitre: str
+    sous_famille: str | None = None
+    designation: str
+    unite: str | None = None
+
+
+class ExtractionSansPrix(BaseModel):
+    items: list[DesignationSansPrix]

@@ -4,8 +4,8 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from prompt import PROMPT_EXTRACTION
-from schema import ExtractionResult
+from prompt import PROMPT_EXTRACTION, PROMPT_EXTRACTION_SANS_PRIX
+from schema import ExtractionResult, ExtractionSansPrix
 
 load_dotenv()
 
@@ -46,6 +46,27 @@ def extract_pdf(file_bytes: bytes, filename: str = "") -> ExtractionResult:
         return response.parsed
     # Filet de securite si le parsing automatique echoue
     return ExtractionResult.model_validate_json(response.text)
+
+
+def extract_pdf_sans_prix(file_bytes: bytes, filename: str = "") -> ExtractionSansPrix:
+    """Meme principe que extract_pdf, pour un bordereau VIERGE (designations
+    et unites presentes, pas de prix) - voir 2_Recherche_de_prix.py."""
+    client = _get_client()
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=[
+            types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"),
+            PROMPT_EXTRACTION_SANS_PRIX,
+        ],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=ExtractionSansPrix,
+        ),
+    )
+
+    if response.parsed is not None:
+        return response.parsed
+    return ExtractionSansPrix.model_validate_json(response.text)
 
 
 if __name__ == "__main__":

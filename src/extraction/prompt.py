@@ -78,3 +78,51 @@ CHAMPS DE SORTIE (pour chaque ligne retenue)
 Convertis tous les nombres au format décimal standard (point, pas de virgule
 ni d'espace de séparation de milliers). N'invente aucune valeur : si un champ
 optionnel est absent, mets null plutôt qu'une estimation."""
+
+
+PROMPT_EXTRACTION_SANS_PRIX = """Tu reçois un bordereau de prix (DQE/BPU) VIERGE issu d'un marché de travaux
+BTP (voirie, assainissement...) : les désignations et unités sont présentes,
+mais la colonne prix est vide (à compléter par le candidat). Ta tâche :
+extraire TOUTES les lignes de désignation, même sans prix — c'est justement
+l'objectif (retrouver le prix moyen correspondant dans une base existante).
+
+RÈGLES DE SÉLECTION
+
+1. Extrais toute ligne qui a une désignation, même sans prix ni quantité.
+   - Ignore les titres de chapitre (ex: "A TERRASSEMENTS...", "III - Bordurage...").
+   - Ignore les lignes TOTAL / SOUS-TOTAL / RECAPITULATIF.
+   - Ignore le texte de mise en page qui réapparaît au milieu du tableau à cause
+     des sauts de page (mentions légales, en-tête de colonnes répété, etc.).
+   - Piège fréquent lié aux sauts de page : un titre de regroupement se
+     retrouve seul en bas de page, ses lignes enfants commencent la page
+     suivante. Ne l'extrais JAMAIS comme une ligne à part : ce titre doit
+     continuer à servir de `chapitre`/`sous_famille` courant pour les lignes
+     suivantes, exactement comme s'il n'y avait pas eu de saut de page.
+
+2. La numérotation change de convention d'un document à l'autre, et parfois
+   d'une section à l'autre dans le MÊME document (lettres A/A.1/A.7a, chiffres
+   romains en titre avec codes numériques en dessous, etc.) — le champ
+   `numero` sert à la traçabilité, jamais de déduction structurelle.
+   Une désignation peut s'étaler sur plusieurs lignes de texte avant d'arriver
+   à l'unité (parfois avec un texte de filler du genre "Ce prix rémunère :"
+   au milieu) — regroupe tout ça en une seule désignation propre. Lis
+   attentivement TOUT le texte imprimé, même quand la mise en page est dense.
+
+3. CHAPITRE ET SOUS-FAMILLE — parcours le document dans l'ordre et maintiens
+   deux valeurs courantes :
+   - `chapitre` = dernier titre de section racine rencontré.
+   - `sous_famille` = dernier header (sans prix, comme tout le document ici)
+     rencontré qui n'est pas lui-même un chapitre racine.
+   - Dès que tu passes à une ligne qui N'EST PLUS un enfant de ce header,
+     `sous_famille` redevient vide (null) — ne le garde surtout pas pour la
+     ligne suivante si elle n'en est pas l'enfant.
+
+CHAMPS DE SORTIE (pour chaque ligne retenue)
+- numero : le numéro/code brut tel qu'écrit (ex: "A.7a", "311,1"), ou null si absent
+- chapitre : le titre de chapitre racine courant
+- sous_famille : le header intermédiaire courant, ou null
+- designation : la désignation complète et propre (recomposée si sur plusieurs lignes)
+- unite : l'unité (ex: "m3", "U", "ml"), ou null si absente
+
+N'invente aucune valeur : si un champ optionnel est absent, mets null plutôt
+qu'une estimation."""
