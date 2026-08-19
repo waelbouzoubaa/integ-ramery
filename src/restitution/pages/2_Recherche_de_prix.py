@@ -115,93 +115,108 @@ st.caption(
 fichier = st.file_uploader("Bordereau vierge (PDF)", type=["pdf"])
 
 if fichier is not None:
-    with st.spinner("Extraction des désignations en cours (peut prendre une minute)..."):
-        resultat = extract_pdf_sans_prix(fichier.getvalue(), filename=fichier.name)
+    # Chaque interaction Streamlit (meme cliquer sur "Telecharger en CSV")
+    # relance TOUT le script depuis le haut - sans ce garde-fou, cliquer sur
+    # le bouton de telechargement relancait l'extraction ET tout le
+    # rapprochement Gemini a chaque fois (bug remonte). On ne retraite le
+    # fichier que s'il a change (nom+taille), sinon on reutilise le resultat
+    # deja calcule, stocke dans la session.
+    identifiant_fichier = f"{fichier.name}_{fichier.size}"
 
-    st.success(f"{len(resultat.items)} ligne(s) de désignation extraite(s) du PDF.")
+    if st.session_state.get("prix_fichier_traite") != identifiant_fichier:
+        with st.spinner("Extraction des désignations en cours (peut prendre une minute)..."):
+            resultat = extract_pdf_sans_prix(fichier.getvalue(), filename=fichier.name)
 
-    # Etape 1 : pre-filtre rapide et gratuit (texte + unite + memes nombres)
-    # pour chaque ligne, sans encore rien decider - juste raccourcir la liste
-    # avant de deranger Gemini (jamais toute la base, seulement le top 5).
-    candidats_par_item = []
-    n_items = len(resultat.items)
-    barre_preselection = st.progress(0.0, text="Présélection des candidats...")
-    for idx, item in enumerate(resultat.items):
-        candidats = pd.read_sql(
-            """
-            SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
-                   similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
-            FROM prix_moyen_par_designation
-            WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
-            ORDER BY score DESC
-            LIMIT 5
-            """,
-            conn, params=(item.designation, item.unite),
-        )
-        candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
-        candidats_par_item.append(candidats.reset_index(drop=True))
-        barre_preselection.progress(
-            (idx + 1) / n_items, text=f"Présélection des candidats... ({idx + 1}/{n_items})"
-        )
-    barre_preselection.empty()
+        st.success(f"{len(resultat.items)} ligne(s) de désignation extraite(s) du PDF.")
 
-    # Etape 2 : score de similarite = 1.0 (texte identique une fois normalise)
-    # -> accepte directement, pas la peine de deranger Gemini pour confirmer
-    # une evidence. Gemini n'arbitre que les cas ou le texte n'est PAS
-    # parfaitement identique mais qu'il reste au moins un candidat pre-filtre
-    # (sinon : rien a arbitrer, "non trouve dans la base").
-    choix_gemini: dict[int, int] = {}
-    a_arbitrer = []
-    for i in range(n_items):
-        candidats = candidats_par_item[i]
-        if candidats.empty:
-            continue
-        if candidats.iloc[0]["score"] >= 0.999:
-            choix_gemini[i] = 0
-        else:
-            a_arbitrer.append((i, resultat.items[i].designation, candidats["designation"].tolist()))
-
-    if a_arbitrer:
-        n_lots = -(-len(a_arbitrer) // TAILLE_LOT)
-        barre_arbitrage = st.progress(0.0, text=f"Gemini arbitre {len(a_arbitrer)} rapprochement(s)...")
-        for lot_idx, i in enumerate(range(0, len(a_arbitrer), TAILLE_LOT)):
-            lot = a_arbitrer[i:i + TAILLE_LOT]
-            choix_gemini.update(_arbitrer_par_lot(lot))
-            barre_arbitrage.progress(
-                (lot_idx + 1) / n_lots,
-                text=f"Gemini arbitre... (lot {lot_idx + 1}/{n_lots})",
+        # Etape 1 : pre-filtre rapide et gratuit (texte + unite + memes nombres)
+        # pour chaque ligne, sans encore rien decider - juste raccourcir la liste
+        # avant de deranger Gemini (jamais toute la base, seulement le top 5).
+        candidats_par_item = []
+        n_items = len(resultat.items)
+        barre_preselection = st.progress(0.0, text="Présélection des candidats...")
+        for idx, item in enumerate(resultat.items):
+            candidats = pd.read_sql(
+                """
+                SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
+                       similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
+                FROM prix_moyen_par_designation
+                WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
+                ORDER BY score DESC
+                LIMIT 5
+                """,
+                conn, params=(item.designation, item.unite),
             )
-        barre_arbitrage.empty()
+            candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
+            candidats_par_item.append(candidats.reset_index(drop=True))
+            barre_preselection.progress(
+                (idx + 1) / n_items, text=f"Présélection des candidats... ({idx + 1}/{n_items})"
+            )
+        barre_preselection.empty()
 
-    # Etape 3 : assemblage du resultat final
-    lignes_resultat = []
-    for i, item in enumerate(resultat.items):
-        candidats = candidats_par_item[i]
-        index_choisi = choix_gemini.get(i, -1)
+        # Etape 2 : score de similarite = 1.0 (texte identique une fois normalise)
+        # -> accepte directement, pas la peine de deranger Gemini pour confirmer
+        # une evidence. Gemini n'arbitre que les cas ou le texte n'est PAS
+        # parfaitement identique mais qu'il reste au moins un candidat pre-filtre
+        # (sinon : rien a arbitrer, "non trouve dans la base").
+        choix_gemini: dict[int, int] = {}
+        a_arbitrer = []
+        for i in range(n_items):
+            candidats = candidats_par_item[i]
+            if candidats.empty:
+                continue
+            if candidats.iloc[0]["score"] >= 0.999:
+                choix_gemini[i] = 0
+            else:
+                a_arbitrer.append((i, resultat.items[i].designation, candidats["designation"].tolist()))
 
-        if not candidats.empty and 0 <= index_choisi < len(candidats):
-            r = candidats.iloc[index_choisi]
-            lignes_resultat.append({
-                "designation_bordereau": item.designation,
-                "unite": item.unite,
-                "designation_trouvee": r["designation"],
-                "sous_famille_trouvee": r["sous_famille"],
-                "prix_moyen_corrige": float(r["prix_moyen_corrige"]),
-                "nb_occurrences": int(r["nb_occurrences"]),
-                "score_correspondance": round(float(r["score"]), 2),
-            })
-        else:
-            lignes_resultat.append({
-                "designation_bordereau": item.designation,
-                "unite": item.unite,
-                "designation_trouvee": None,
-                "sous_famille_trouvee": None,
-                "prix_moyen_corrige": None,
-                "nb_occurrences": None,
-                "score_correspondance": None,
-            })
+        if a_arbitrer:
+            n_lots = -(-len(a_arbitrer) // TAILLE_LOT)
+            barre_arbitrage = st.progress(0.0, text=f"Gemini arbitre {len(a_arbitrer)} rapprochement(s)...")
+            for lot_idx, i in enumerate(range(0, len(a_arbitrer), TAILLE_LOT)):
+                lot = a_arbitrer[i:i + TAILLE_LOT]
+                choix_gemini.update(_arbitrer_par_lot(lot))
+                barre_arbitrage.progress(
+                    (lot_idx + 1) / n_lots,
+                    text=f"Gemini arbitre... (lot {lot_idx + 1}/{n_lots})",
+                )
+            barre_arbitrage.empty()
 
-    df_resultat = pd.DataFrame(lignes_resultat)
+        # Etape 3 : assemblage du resultat final
+        lignes_resultat = []
+        for i, item in enumerate(resultat.items):
+            candidats = candidats_par_item[i]
+            index_choisi = choix_gemini.get(i, -1)
+
+            if not candidats.empty and 0 <= index_choisi < len(candidats):
+                r = candidats.iloc[index_choisi]
+                lignes_resultat.append({
+                    "designation_bordereau": item.designation,
+                    "unite": item.unite,
+                    "designation_trouvee": r["designation"],
+                    "sous_famille_trouvee": r["sous_famille"],
+                    "prix_moyen_corrige": float(r["prix_moyen_corrige"]),
+                    "nb_occurrences": int(r["nb_occurrences"]),
+                    "score_correspondance": round(float(r["score"]), 2),
+                })
+            else:
+                lignes_resultat.append({
+                    "designation_bordereau": item.designation,
+                    "unite": item.unite,
+                    "designation_trouvee": None,
+                    "sous_famille_trouvee": None,
+                    "prix_moyen_corrige": None,
+                    "nb_occurrences": None,
+                    "score_correspondance": None,
+                })
+
+        # Resultat mis en cache dans la session : les prochains re-runs du
+        # script (ex. clic sur "Telecharger en CSV") reutilisent ce resultat
+        # au lieu de tout recalculer, tant que le meme fichier reste charge.
+        st.session_state["prix_fichier_traite"] = identifiant_fichier
+        st.session_state["prix_df_resultat"] = pd.DataFrame(lignes_resultat)
+
+    df_resultat = st.session_state["prix_df_resultat"]
     nb_trouves = int(df_resultat["prix_moyen_corrige"].notna().sum())
     st.write(f"**{nb_trouves} / {len(df_resultat)}** désignations rapprochées avec succès.")
     if nb_trouves < len(df_resultat):
