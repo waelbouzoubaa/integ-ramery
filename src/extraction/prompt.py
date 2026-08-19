@@ -40,6 +40,12 @@ RÈGLES DE SÉLECTION
      resserrés en fin de document par exemple). Ne laisse jamais une désignation
      vide ou réduite à l'unité/au prix si un texte descriptif est présent sur
      la page à cet endroit.
+   - Transcris toujours le texte en alphabet LATIN standard, jamais en
+     cyrillique, grec ou tout autre alphabet dont certaines lettres se
+     dessinent comme des lettres latines (ex: le nom de materiau "BBME" doit
+     toujours etre transcrit avec un B, M, E latins - jamais avec des lettres
+     cyrilliques/grecques qui se dessinent pareil visuellement mais sont un
+     code different).
 
 3. CHAPITRE ET SOUS-FAMILLE — parcours le document dans l'ordre et maintiens
    deux valeurs courantes :
@@ -107,6 +113,11 @@ RÈGLES DE SÉLECTION
    à l'unité (parfois avec un texte de filler du genre "Ce prix rémunère :"
    au milieu) — regroupe tout ça en une seule désignation propre. Lis
    attentivement TOUT le texte imprimé, même quand la mise en page est dense.
+   Transcris toujours le texte en alphabet LATIN standard, jamais en
+   cyrillique, grec ou tout autre alphabet dont certaines lettres se
+   dessinent comme des lettres latines (ex: "BBME" doit toujours avoir un
+   B, M, E latins - jamais des lettres cyrilliques/grecques visuellement
+   identiques mais d'un code different).
 
 3. CHAPITRE ET SOUS-FAMILLE — parcours le document dans l'ordre et maintiens
    deux valeurs courantes :

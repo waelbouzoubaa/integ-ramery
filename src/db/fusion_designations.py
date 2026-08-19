@@ -133,6 +133,19 @@ def get_conn():
 
 _ACCENTS = str.maketrans("àâäéèêëîïôöùûüç", "aaaeeeeiioouuuc")
 
+# Gemini hallucine parfois des lettres cyrilliques/grecques visuellement
+# identiques au latin (ex. "BBME" extrait tantot en latin, tantot "ΒΒΜΕ" en
+# grec, tantot "ВВМЕ" en cyrillique - meme materiau BTP, 3 encodages
+# differents constates en pratique). Sans cette table, ces variantes ne sont
+# JAMAIS reconnues comme identiques (ce sont des caracteres Unicode
+# differents), et le meme produit se retrouve eclate en plusieurs groupes.
+# Mappe uniquement les minuscules confondables (normaliser() met deja tout
+# en minuscule avant ce point).
+_HOMOGLYPHES = str.maketrans(
+    "авекмнорстух" "αβεζηικμνορτυχ",
+    "abekmhopctyx" "abezhikmnoptyx",
+)
+
 
 def normaliser(designation: str) -> str:
     d = designation.lower().strip()
@@ -140,6 +153,7 @@ def normaliser(designation: str) -> str:
     d = re.sub(r"^(suivant|selon)\s+d[ée]finition\s+du\s+prix.*?:\s*", "", d)
     d = re.sub(r"^ce prix r[ée]mun[èe]re\s*:?\s*", "", d)
     d = d.translate(_ACCENTS)
+    d = d.translate(_HOMOGLYPHES)
     d = re.sub(r"[^\w\s]", " ", d)  # ponctuation -> espace (garde les mots separes)
     d = re.sub(r"\s+", " ", d)
     return d.strip()
