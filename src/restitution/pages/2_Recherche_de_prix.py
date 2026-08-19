@@ -124,36 +124,54 @@ if fichier is not None:
     # pour chaque ligne, sans encore rien decider - juste raccourcir la liste
     # avant de deranger Gemini (jamais toute la base, seulement le top 5).
     candidats_par_item = []
-    with st.spinner("Présélection des candidats..."):
-        for item in resultat.items:
-            candidats = pd.read_sql(
-                """
-                SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
-                       similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
-                FROM prix_moyen_par_designation
-                WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
-                ORDER BY score DESC
-                LIMIT 5
-                """,
-                conn, params=(item.designation, item.unite),
-            )
-            candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
-            candidats_par_item.append(candidats.reset_index(drop=True))
+    n_items = len(resultat.items)
+    barre_preselection = st.progress(0.0, text="Présélection des candidats...")
+    for idx, item in enumerate(resultat.items):
+        candidats = pd.read_sql(
+            """
+            SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
+                   similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
+            FROM prix_moyen_par_designation
+            WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
+            ORDER BY score DESC
+            LIMIT 5
+            """,
+            conn, params=(item.designation, item.unite),
+        )
+        candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
+        candidats_par_item.append(candidats.reset_index(drop=True))
+        barre_preselection.progress(
+            (idx + 1) / n_items, text=f"Présélection des candidats... ({idx + 1}/{n_items})"
+        )
+    barre_preselection.empty()
 
-    # Etape 2 : Gemini tranche, uniquement pour les lignes qui ont au moins un
-    # candidat pre-filtre (pas la peine de l'appeler s'il n'y a rien a choisir).
-    a_arbitrer = [
-        (i, resultat.items[i].designation, candidats_par_item[i]["designation"].tolist())
-        for i in range(len(resultat.items))
-        if not candidats_par_item[i].empty
-    ]
-
+    # Etape 2 : score de similarite = 1.0 (texte identique une fois normalise)
+    # -> accepte directement, pas la peine de deranger Gemini pour confirmer
+    # une evidence. Gemini n'arbitre que les cas ou le texte n'est PAS
+    # parfaitement identique mais qu'il reste au moins un candidat pre-filtre
+    # (sinon : rien a arbitrer, "non trouve dans la base").
     choix_gemini: dict[int, int] = {}
+    a_arbitrer = []
+    for i in range(n_items):
+        candidats = candidats_par_item[i]
+        if candidats.empty:
+            continue
+        if candidats.iloc[0]["score"] >= 0.999:
+            choix_gemini[i] = 0
+        else:
+            a_arbitrer.append((i, resultat.items[i].designation, candidats["designation"].tolist()))
+
     if a_arbitrer:
-        with st.spinner(f"Gemini arbitre {len(a_arbitrer)} rapprochement(s)..."):
-            for i in range(0, len(a_arbitrer), TAILLE_LOT):
-                lot = a_arbitrer[i:i + TAILLE_LOT]
-                choix_gemini.update(_arbitrer_par_lot(lot))
+        n_lots = -(-len(a_arbitrer) // TAILLE_LOT)
+        barre_arbitrage = st.progress(0.0, text=f"Gemini arbitre {len(a_arbitrer)} rapprochement(s)...")
+        for lot_idx, i in enumerate(range(0, len(a_arbitrer), TAILLE_LOT)):
+            lot = a_arbitrer[i:i + TAILLE_LOT]
+            choix_gemini.update(_arbitrer_par_lot(lot))
+            barre_arbitrage.progress(
+                (lot_idx + 1) / n_lots,
+                text=f"Gemini arbitre... (lot {lot_idx + 1}/{n_lots})",
+            )
+        barre_arbitrage.empty()
 
     # Etape 3 : assemblage du resultat final
     lignes_resultat = []
@@ -185,7 +203,7 @@ if fichier is not None:
 
     df_resultat = pd.DataFrame(lignes_resultat)
     nb_trouves = int(df_resultat["prix_moyen_corrige"].notna().sum())
-    st.write(f"**{nb_trouves} / {len(df_resultat)}** désignations rapprochées avec succès (validé par Gemini).")
+    st.write(f"**{nb_trouves} / {len(df_resultat)}** désignations rapprochées avec succès.")
     if nb_trouves < len(df_resultat):
         st.caption(
             "Les lignes sans correspondance (aucun candidat présélectionné, "
