@@ -6,6 +6,9 @@ import pandas as pd
 import psycopg
 import streamlit as st
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -25,6 +28,68 @@ from fusion_designations import memes_nombres  # noqa: E402
 
 st.set_page_config(page_title="Recherche de prix", page_icon="🔎", layout="wide")
 
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+TAILLE_LOT = 20  # lignes de bordereau par appel Gemini (garde le prompt raisonnable)
+
+PROMPT_RAPPROCHEMENT = """Tu reçois des lignes de désignation issues d'un bordereau de prix BTP VIERGE
+(sans prix), et pour chacune une courte liste de candidats trouvés dans une
+base de prix existante (déjà pré-filtrés par ressemblance de texte et même
+unité). Pour CHAQUE ligne, détermine si un des candidats décrit RÉELLEMENT LE
+MÊME PRODUIT que la désignation du bordereau (permettant de réutiliser son
+prix moyen), ou si aucun candidat ne correspond vraiment.
+
+Sois strict : une différence de nature du produit (matériau fourni vs
+matériau réutilisé/existant sur site, classe, diamètre, épaisseur, méthode
+de pose) rend deux désignations NON équivalentes, même si le texte se
+ressemble beaucoup. Dans le doute, réponds qu'aucun candidat ne correspond
+plutôt que de choisir au hasard.
+
+Réponds pour CHAQUE id reçu, dans le même ordre : l'index (0-based) du bon
+candidat dans SA liste, ou -1 si aucun candidat ne correspond."""
+
+
+class ChoixRapprochement(BaseModel):
+    id: int
+    index_candidat: int  # -1 si aucun candidat ne correspond
+
+
+class ChoixRapprochements(BaseModel):
+    choix: list[ChoixRapprochement]
+
+
+_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    global _client
+    if _client is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            st.error("GEMINI_API_KEY manquant dans .env")
+            st.stop()
+        _client = genai.Client(api_key=api_key)
+    return _client
+
+
+def _arbitrer_par_lot(lot: list[tuple]) -> dict[int, int]:
+    """lot = liste de (id, designation_bordereau, [designations_candidates]).
+    Renvoie {id: index_candidat_choisi (-1 si aucun)}."""
+    lignes = []
+    for id_, designation, candidats_txt in lot:
+        options = "  ".join(f"[{i}] {c!r}" for i, c in enumerate(candidats_txt))
+        lignes.append(f"{id_}. Bordereau: {designation!r}\n   Candidats: {options}")
+
+    response = _get_client().models.generate_content(
+        model=MODEL,
+        contents=[PROMPT_RAPPROCHEMENT, "\n".join(lignes)],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=ChoixRapprochements,
+        ),
+    )
+    result = response.parsed if response.parsed is not None else ChoixRapprochements.model_validate_json(response.text)
+    return {c.id: c.index_candidat for c in result.choix}
+
 
 @st.cache_resource
 def get_conn():
@@ -41,20 +106,10 @@ st.title("Recherche de prix pour un bordereau vierge")
 st.caption(
     "Upload un bordereau de prix SANS prix renseignés (DQE/BPU vierge à "
     "compléter, désignations et unités présentes). L'IA extrait chaque "
-    "désignation, la rapproche de la base de prix existante par similarité "
-    "de texte (jamais entre deux nombres différents — une profondeur, un "
-    "diamètre ou une classe qui diffère est presque toujours un produit "
-    "différent), et affiche le prix moyen corrigé correspondant."
-)
-
-seuil_correspondance = st.slider(
-    "Seuil de correspondance (similarité de texte, 0 à 1)",
-    min_value=0.0, max_value=1.0, value=0.4, step=0.05,
-    help=(
-        "En dessous de ce seuil, aucune correspondance n'est proposée pour "
-        "la ligne (mieux vaut 'aucune correspondance' qu'un mauvais "
-        "rapprochement)."
-    ),
+    "désignation, présélectionne les candidats les plus proches en base "
+    "(texte + unité identique, jamais entre deux nombres différents), puis "
+    "Gemini tranche lequel décrit vraiment le même produit avant d'afficher "
+    "le prix moyen corrigé correspondant."
 )
 
 fichier = st.file_uploader("Bordereau vierge (PDF)", type=["pdf"])
@@ -65,34 +120,49 @@ if fichier is not None:
 
     st.success(f"{len(resultat.items)} ligne(s) de désignation extraite(s) du PDF.")
 
-    # Une requete par ligne extraite (volume typique d'un bordereau : quelques
-    # dizaines a centaines de lignes, largement gerable en boucle simple sans
-    # avoir a batcher en une seule requete geante).
-    lignes_resultat = []
-    for item in resultat.items:
-        # Top 5 (pas juste le meilleur score) : la similarite de texte seule
-        # confond des variantes qui ne different que par un nombre (ex.
-        # "Fraisage de 6 a 12 cm" vs "Fraisage de 0 a 6 cm" - meme texte a un
-        # chiffre pres, score eleve, mais probablement des prix differents).
-        # On filtre ensuite avec memes_nombres (meme regle que la fusion des
-        # designations) : un nombre qui differe (profondeur, diametre,
-        # classe...) est presque toujours un produit different dans ce metier.
-        candidats = pd.read_sql(
-            """
-            SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
-                   similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
-            FROM prix_moyen_par_designation
-            WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
-            ORDER BY score DESC
-            LIMIT 5
-            """,
-            conn, params=(item.designation, item.unite),
-        )
-        candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
+    # Etape 1 : pre-filtre rapide et gratuit (texte + unite + memes nombres)
+    # pour chaque ligne, sans encore rien decider - juste raccourcir la liste
+    # avant de deranger Gemini (jamais toute la base, seulement le top 5).
+    candidats_par_item = []
+    with st.spinner("Présélection des candidats..."):
+        for item in resultat.items:
+            candidats = pd.read_sql(
+                """
+                SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
+                       similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
+                FROM prix_moyen_par_designation
+                WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
+                ORDER BY score DESC
+                LIMIT 5
+                """,
+                conn, params=(item.designation, item.unite),
+            )
+            candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
+            candidats_par_item.append(candidats.reset_index(drop=True))
 
-        trouve = not candidats.empty and candidats.iloc[0]["score"] >= seuil_correspondance
-        if trouve:
-            r = candidats.iloc[0]
+    # Etape 2 : Gemini tranche, uniquement pour les lignes qui ont au moins un
+    # candidat pre-filtre (pas la peine de l'appeler s'il n'y a rien a choisir).
+    a_arbitrer = [
+        (i, resultat.items[i].designation, candidats_par_item[i]["designation"].tolist())
+        for i in range(len(resultat.items))
+        if not candidats_par_item[i].empty
+    ]
+
+    choix_gemini: dict[int, int] = {}
+    if a_arbitrer:
+        with st.spinner(f"Gemini arbitre {len(a_arbitrer)} rapprochement(s)..."):
+            for i in range(0, len(a_arbitrer), TAILLE_LOT):
+                lot = a_arbitrer[i:i + TAILLE_LOT]
+                choix_gemini.update(_arbitrer_par_lot(lot))
+
+    # Etape 3 : assemblage du resultat final
+    lignes_resultat = []
+    for i, item in enumerate(resultat.items):
+        candidats = candidats_par_item[i]
+        index_choisi = choix_gemini.get(i, -1)
+
+        if not candidats.empty and 0 <= index_choisi < len(candidats):
+            r = candidats.iloc[index_choisi]
             lignes_resultat.append({
                 "designation_bordereau": item.designation,
                 "unite": item.unite,
@@ -103,9 +173,6 @@ if fichier is not None:
                 "score_correspondance": round(float(r["score"]), 2),
             })
         else:
-            score_le_plus_proche = (
-                round(float(candidats.iloc[0]["score"]), 2) if not candidats.empty else None
-            )
             lignes_resultat.append({
                 "designation_bordereau": item.designation,
                 "unite": item.unite,
@@ -113,18 +180,18 @@ if fichier is not None:
                 "sous_famille_trouvee": None,
                 "prix_moyen_corrige": None,
                 "nb_occurrences": None,
-                "score_correspondance": score_le_plus_proche,
+                "score_correspondance": None,
             })
 
     df_resultat = pd.DataFrame(lignes_resultat)
     nb_trouves = int(df_resultat["prix_moyen_corrige"].notna().sum())
-    st.write(f"**{nb_trouves} / {len(df_resultat)}** désignations rapprochées avec succès.")
+    st.write(f"**{nb_trouves} / {len(df_resultat)}** désignations rapprochées avec succès (validé par Gemini).")
     if nb_trouves < len(df_resultat):
         st.caption(
-            "Les lignes sans correspondance (score sous le seuil, ou aucun "
-            "prix de cette unité en base) restent affichées ci-dessous pour "
-            "que rien ne disparaisse silencieusement — baisse le seuil si "
-            "besoin, ou complète-les manuellement."
+            "Les lignes sans correspondance (aucun candidat présélectionné, "
+            "ou Gemini a jugé qu'aucun candidat ne correspondait vraiment) "
+            "restent affichées ci-dessous pour que rien ne disparaisse "
+            "silencieusement — à compléter manuellement."
         )
 
     st.dataframe(
@@ -138,7 +205,7 @@ if fichier is not None:
             "sous_famille_trouvee": "Sous-famille (base)",
             "prix_moyen_corrige": st.column_config.NumberColumn("Prix moyen corrigé (€)", format="%.2f"),
             "nb_occurrences": "Occurrences (base)",
-            "score_correspondance": st.column_config.NumberColumn("Score de correspondance", format="%.2f"),
+            "score_correspondance": st.column_config.NumberColumn("Score de similarité", format="%.2f"),
         },
     )
 
