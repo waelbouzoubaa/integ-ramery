@@ -39,11 +39,14 @@ st.markdown(
        s'affichait quand meme APRES la navigation (testid stSidebarNav) :
        Streamlit reserve un emplacement fixe pour la nav dans la sidebar,
        peu importe l'ordre des appels dans le script. On force l'ordre
-       visuel en CSS plutot que par l'ordre du code. */
+       visuel en CSS plutot que par l'ordre du code. La fleche pour
+       reduire/agrandir la sidebar (stSidebarCollapseButton) est un 3e
+       element du meme conteneur - reste tout en haut, au-dessus du logo. */
     [data-testid="stSidebar"] > div:first-child {
         display: flex;
         flex-direction: column;
     }
+    [data-testid="stSidebarCollapseButton"] { order: -2; }
     [data-testid="stSidebarUserContent"] { order: -1; }
     [data-testid="stSidebarNav"] { order: 2; }
 
