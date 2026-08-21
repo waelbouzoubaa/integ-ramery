@@ -35,6 +35,18 @@ st.markdown(
     [data-testid="stSidebar"] { background-color: #003D7C; }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
 
+    /* Le logo (ajoute via st.sidebar.markdown, testid stSidebarUserContent)
+       s'affichait quand meme APRES la navigation (testid stSidebarNav) :
+       Streamlit reserve un emplacement fixe pour la nav dans la sidebar,
+       peu importe l'ordre des appels dans le script. On force l'ordre
+       visuel en CSS plutot que par l'ordre du code. */
+    [data-testid="stSidebar"] > div:first-child {
+        display: flex;
+        flex-direction: column;
+    }
+    [data-testid="stSidebarUserContent"] { order: -1; }
+    [data-testid="stSidebarNav"] { order: 2; }
+
     .sidebar-header {
         display: flex; justify-content: center; align-items: center;
         padding: 14px 0 18px; margin-bottom: 6px;
@@ -70,7 +82,7 @@ if _logo:
     )
 
 pages = [
-    st.Page("vues/prix_unitaires.py", title="Prix unitaires DQE", icon="📊", default=True),
+    st.Page("vues/prix_unitaires.py", title="Prix unitaires", icon="📊", default=True),
     st.Page("vues/revue_des_groupes.py", title="Revue des groupes", icon="🔍"),
     st.Page("vues/recherche_de_prix.py", title="Recherche de prix", icon="🔎"),
 ]
