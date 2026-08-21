@@ -1,3 +1,4 @@
+import base64
 import os
 from collections import Counter
 from pathlib import Path
@@ -11,33 +12,58 @@ load_dotenv()
 
 st.set_page_config(page_title="Prix unitaires DQE", page_icon="📊", layout="wide")
 
-# Charte graphique Ramery (docs/Charte graphique 2023.pdf) : bleu corporate
-# #003D7C force directement sur le fond de la sidebar (pas via
-# secondaryBackgroundColor du theme, qui colore aussi les champs de saisie
-# de toute l'app - bug constate : les barres de recherche devenaient bleues).
-# Texte de sidebar force en blanc (seule la sidebar a un fond sombre). Logo
-# centre et recadre en rond (CSS, le fichier source n'est pas forcement carre).
-st.logo(str(Path(__file__).resolve().parent / "assets" / "logo.png"))
+# Charte graphique Ramery (docs/Charte graphique 2023.pdf), meme approche que
+# le projet middleware-ramery (streamlit_review/app.py) : logo integre en
+# base64 dans une div centree plutot que st.logo() (rendu plus fiable,
+# independant des data-testid internes de Streamlit qui changent de version
+# en version). Bleu corporate #003D7C force en CSS directement sur la
+# sidebar (jamais via secondaryBackgroundColor du theme, qui colore aussi
+# les champs de saisie de toute l'app - bug constate).
+LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
+
+
+def _logo_data_uri() -> str:
+    try:
+        data = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+        return f"data:image/png;base64,{data}"
+    except OSError:
+        return ""
+
+
 st.markdown(
     """
     <style>
     [data-testid="stSidebar"] { background-color: #003D7C; }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
-    [data-testid="stSidebarHeader"] {
-        display: flex;
-        justify-content: center;
-        align-items: center;
+
+    .sidebar-header {
+        display: flex; justify-content: center; align-items: center;
+        padding: 6px 0 18px; margin-bottom: 10px;
+        border-bottom: 1px solid rgba(255,255,255,.25);
     }
-    [data-testid="stSidebarHeader"] img, [data-testid="stLogo"] {
-        border-radius: 50%;
-        width: 90px;
-        height: 90px;
-        object-fit: cover;
+    .sidebar-header img {
+        border-radius: 50%; border: 2px solid rgba(255,255,255,.4);
+        height: 70px; width: 70px; object-fit: cover;
+    }
+
+    /* Champs de saisie (recherche...) : sans cadre, blanc sur blanc se
+       confondait avec le fond de page - bordure bleue + coins arrondis
+       pour qu'on les distingue clairement comme des zones cliquables. */
+    .stTextInput input {
+        border: 1px solid #003D7C !important;
+        border-radius: 6px !important;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+_logo = _logo_data_uri()
+if _logo:
+    st.sidebar.markdown(
+        f'<div class="sidebar-header"><img src="{_logo}" alt="Ramery"/></div>',
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_resource
@@ -91,7 +117,10 @@ with st.expander("⚙️ Paramètres de détection des anomalies de prix"):
         st.success("Seuil mis à jour.")
         st.rerun()
 
-recherche = st.text_input("Rechercher une désignation (recherche partielle) ou un prix")
+recherche = st.text_input(
+    "Rechercher une désignation (recherche partielle) ou un prix",
+    placeholder="Ex : bordure, déviation, 45.20...",
+)
 
 query = """
     SELECT sous_famille, unite, designation, nb_occurrences,

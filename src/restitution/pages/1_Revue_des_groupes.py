@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import io
 import os
@@ -22,29 +23,50 @@ import fusion_designations  # noqa: E402
 
 st.set_page_config(page_title="Revue des groupes", page_icon="🔍", layout="wide")
 
-# Charte graphique Ramery : voir app.py pour le detail (fond sidebar bleu
-# force en CSS, logo centre et recadre en rond).
-st.logo(str(Path(__file__).resolve().parents[1] / "assets" / "logo.png"))
+# Charte graphique Ramery : voir app.py pour le detail (meme approche que
+# middleware-ramery, logo en base64 plutot que st.logo()).
+LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo.png"
+
+
+def _logo_data_uri() -> str:
+    try:
+        data = base64.b64encode(LOGO_PATH.read_bytes()).decode()
+        return f"data:image/png;base64,{data}"
+    except OSError:
+        return ""
+
+
 st.markdown(
     """
     <style>
     [data-testid="stSidebar"] { background-color: #003D7C; }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
-    [data-testid="stSidebarHeader"] {
-        display: flex;
-        justify-content: center;
-        align-items: center;
+
+    .sidebar-header {
+        display: flex; justify-content: center; align-items: center;
+        padding: 6px 0 18px; margin-bottom: 10px;
+        border-bottom: 1px solid rgba(255,255,255,.25);
     }
-    [data-testid="stSidebarHeader"] img, [data-testid="stLogo"] {
-        border-radius: 50%;
-        width: 90px;
-        height: 90px;
-        object-fit: cover;
+    .sidebar-header img {
+        border-radius: 50%; border: 2px solid rgba(255,255,255,.4);
+        height: 70px; width: 70px; object-fit: cover;
+    }
+
+    .stTextInput input {
+        border: 1px solid #003D7C !important;
+        border-radius: 6px !important;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+_logo = _logo_data_uri()
+if _logo:
+    st.sidebar.markdown(
+        f'<div class="sidebar-header"><img src="{_logo}" alt="Ramery"/></div>',
+        unsafe_allow_html=True,
+    )
 
 
 @st.cache_resource
