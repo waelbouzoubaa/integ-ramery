@@ -20,41 +20,6 @@ if str(DB_DIR) not in sys.path:
 
 import fusion_designations  # noqa: E402
 
-st.set_page_config(page_title="Revue des groupes", page_icon="🔍", layout="wide")
-
-# Charte graphique Ramery : voir app.py pour le detail (st.logo() garantit
-# le placement tout en haut de la sidebar, au-dessus de la navigation).
-st.logo(str(Path(__file__).resolve().parents[1] / "assets" / "logo.png"), size="large")
-
-st.markdown(
-    """
-    <style>
-    [data-testid="stSidebar"] { background-color: #003D7C; }
-    [data-testid="stSidebar"] * { color: #FFFFFF !important; }
-
-    [data-testid="stSidebarLogo"] {
-        display: flex; justify-content: center;
-        padding: 10px 0 18px;
-        border-bottom: 1px solid rgba(255,255,255,.25);
-    }
-    [data-testid="stSidebarLogo"] img {
-        border-radius: 50%; border: 2px solid rgba(255,255,255,.4);
-    }
-
-    .stTextInput input {
-        border: 1px solid #003D7C !important;
-        border-radius: 6px !important;
-    }
-    [data-testid="stSelectbox"] > div > div,
-    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
-        border: 1px solid #003D7C !important;
-        border-radius: 6px !important;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 
 @st.cache_resource
 def get_conn():
