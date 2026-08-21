@@ -28,6 +28,18 @@ from fusion_designations import memes_nombres  # noqa: E402
 
 st.set_page_config(page_title="Recherche de prix", page_icon="🔎", layout="wide")
 
+# Charte graphique Ramery : voir app.py pour le detail (fond sidebar bleu
+# corporate #003D7C via .streamlit/config.toml, texte force en blanc ici).
+st.logo(str(Path(__file__).resolve().parents[1] / "assets" / "logo.png"))
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"] * { color: #FFFFFF !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 TAILLE_LOT = 20  # lignes de bordereau par appel Gemini (garde le prompt raisonnable)
 

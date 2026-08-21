@@ -22,6 +22,18 @@ import fusion_designations  # noqa: E402
 
 st.set_page_config(page_title="Revue des groupes", page_icon="🔍", layout="wide")
 
+# Charte graphique Ramery : voir app.py pour le detail (fond sidebar bleu
+# corporate #003D7C via .streamlit/config.toml, texte force en blanc ici).
+st.logo(str(Path(__file__).resolve().parents[1] / "assets" / "logo.png"))
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"] * { color: #FFFFFF !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 @st.cache_resource
 def get_conn():
