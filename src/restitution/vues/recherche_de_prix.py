@@ -100,6 +100,56 @@ def get_conn():
 
 conn = get_conn()
 
+# Bandeau d'etapes (stepper) : visualise ou en est le pipeline
+# extraction -> rapprochement -> validation Gemini. Meme mecanique que le
+# stepper du projet "Agent reunion" (cercles relies par des traits, 3 etats
+# fait/actif/a venir), recolore aux couleurs Ramery.
+ETAPES = [("extraction", "📄", "Extraction"), ("rapprochement", "🔍", "Rapprochement"), ("validation", "🤖", "Validation Gemini")]
+
+st.markdown(
+    """
+    <style>
+    .stepper-wrap { display: flex; align-items: flex-start; justify-content: center; margin: 0 auto 1.5rem; max-width: 600px; }
+    .step-item { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 110px; }
+    .step-icon { width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1rem; font-weight: 700; flex-shrink: 0; }
+    .step-icon-done    { background: #003D7C; color: #fff; }
+    .step-icon-active  { background: #003D7C; color: #fff; box-shadow: 0 0 12px rgba(0,61,124,.45); }
+    .step-icon-pending { background: #F0F0F0; color: #9CA3AF; border: 2px solid #D1D5DB; }
+    .step-label { font-size: .75rem; font-weight: 600; text-align: center; white-space: nowrap; }
+    .step-label-done    { color: #003D7C; }
+    .step-label-active  { color: #003D7C; }
+    .step-label-pending { color: #9CA3AF; }
+    .step-connector { flex: 1; height: 2px; margin-top: 18px; min-width: 25px; }
+    .step-connector-done    { background: #003D7C; }
+    .step-connector-active  { background: linear-gradient(90deg, #003D7C 0%, #D1D5DB 100%); }
+    .step-connector-pending { background: #E2E8F0; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def _rendre_stepper(placeholder, etape_active: str | None) -> None:
+    """etape_active = cle de l'etape en cours ('extraction', 'rapprochement',
+    'validation'), ou None pour tout marquer comme termine (pipeline fini)."""
+    cur = len(ETAPES) if etape_active is None else next(
+        i for i, (cle, _, _) in enumerate(ETAPES) if cle == etape_active
+    )
+    html = '<div class="stepper-wrap">'
+    for i, (_, icone, label) in enumerate(ETAPES):
+        if i < cur:
+            ic, lc, affichage = "step-icon-done", "step-label-done", "✓"
+        elif i == cur:
+            ic, lc, affichage = "step-icon-active", "step-label-active", icone
+        else:
+            ic, lc, affichage = "step-icon-pending", "step-label-pending", icone
+        html += f'<div class="step-item"><div class="step-icon {ic}">{affichage}</div><span class="step-label {lc}">{label}</span></div>'
+        if i < len(ETAPES) - 1:
+            cc = "step-connector-done" if i < cur else ("step-connector-active" if i == cur else "step-connector-pending")
+            html += f'<div class="step-connector {cc}"></div>'
+    html += "</div>"
+    placeholder.markdown(html, unsafe_allow_html=True)
+
 st.title("Recherche de prix pour un bordereau vierge")
 st.caption(
     "Upload un bordereau de prix SANS prix renseignés (DQE/BPU vierge à "
@@ -120,12 +170,15 @@ if fichier is not None:
     # fichier que s'il a change (nom+taille), sinon on reutilise le resultat
     # deja calcule, stocke dans la session.
     identifiant_fichier = f"{fichier.name}_{fichier.size}"
+    stepper_placeholder = st.empty()
 
     if st.session_state.get("prix_fichier_traite") != identifiant_fichier:
+        _rendre_stepper(stepper_placeholder, "extraction")
         with st.spinner("Extraction des désignations en cours (peut prendre une minute)..."):
             resultat = extract_pdf_sans_prix(fichier.getvalue(), filename=fichier.name)
 
         st.success(f"{len(resultat.items)} ligne(s) de désignation extraite(s) du PDF.")
+        _rendre_stepper(stepper_placeholder, "rapprochement")
 
         # Etape 1 : pre-filtre rapide et gratuit (texte + unite + memes nombres)
         # pour chaque ligne, sans encore rien decider - juste raccourcir la liste
@@ -169,6 +222,7 @@ if fichier is not None:
                 a_arbitrer.append((i, resultat.items[i].designation, candidats["designation"].tolist()))
 
         if a_arbitrer:
+            _rendre_stepper(stepper_placeholder, "validation")
             n_lots = -(-len(a_arbitrer) // TAILLE_LOT)
             barre_arbitrage = st.progress(0.0, text=f"Gemini arbitre {len(a_arbitrer)} rapprochement(s)...")
             for lot_idx, i in enumerate(range(0, len(a_arbitrer), TAILLE_LOT)):
@@ -213,6 +267,9 @@ if fichier is not None:
         # au lieu de tout recalculer, tant que le meme fichier reste charge.
         st.session_state["prix_fichier_traite"] = identifiant_fichier
         st.session_state["prix_df_resultat"] = pd.DataFrame(lignes_resultat)
+
+    # Etat final (fait ou reutilise du cache) : les 3 etapes passent a "fait".
+    _rendre_stepper(stepper_placeholder, None)
 
     df_resultat = st.session_state["prix_df_resultat"]
     nb_trouves = int(df_resultat["prix_moyen_corrige"].notna().sum())
