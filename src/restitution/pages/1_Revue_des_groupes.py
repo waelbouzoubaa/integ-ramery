@@ -1,4 +1,3 @@
-import base64
 import contextlib
 import io
 import os
@@ -23,18 +22,9 @@ import fusion_designations  # noqa: E402
 
 st.set_page_config(page_title="Revue des groupes", page_icon="🔍", layout="wide")
 
-# Charte graphique Ramery : voir app.py pour le detail (meme approche que
-# middleware-ramery, logo en base64 plutot que st.logo()).
-LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo.png"
-
-
-def _logo_data_uri() -> str:
-    try:
-        data = base64.b64encode(LOGO_PATH.read_bytes()).decode()
-        return f"data:image/png;base64,{data}"
-    except OSError:
-        return ""
-
+# Charte graphique Ramery : voir app.py pour le detail (st.logo() garantit
+# le placement tout en haut de la sidebar, au-dessus de la navigation).
+st.logo(str(Path(__file__).resolve().parents[1] / "assets" / "logo.png"))
 
 st.markdown(
     """
@@ -42,17 +32,22 @@ st.markdown(
     [data-testid="stSidebar"] { background-color: #003D7C; }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
 
-    .sidebar-header {
-        display: flex; justify-content: center; align-items: center;
-        padding: 6px 0 18px; margin-bottom: 10px;
+    [data-testid="stSidebarLogo"] {
+        display: flex; justify-content: center;
+        padding: 10px 0 18px;
         border-bottom: 1px solid rgba(255,255,255,.25);
     }
-    .sidebar-header img {
+    [data-testid="stSidebarLogo"] img {
         border-radius: 50%; border: 2px solid rgba(255,255,255,.4);
-        height: 70px; width: 70px; object-fit: cover;
+        height: 70px !important; width: 70px !important; object-fit: cover;
     }
 
     .stTextInput input {
+        border: 1px solid #003D7C !important;
+        border-radius: 6px !important;
+    }
+    [data-testid="stSelectbox"] > div > div,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
         border: 1px solid #003D7C !important;
         border-radius: 6px !important;
     }
@@ -60,13 +55,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-_logo = _logo_data_uri()
-if _logo:
-    st.sidebar.markdown(
-        f'<div class="sidebar-header"><img src="{_logo}" alt="Ramery"/></div>',
-        unsafe_allow_html=True,
-    )
 
 
 @st.cache_resource

@@ -1,4 +1,3 @@
-import base64
 import os
 from collections import Counter
 from pathlib import Path
@@ -12,23 +11,17 @@ load_dotenv()
 
 st.set_page_config(page_title="Prix unitaires DQE", page_icon="📊", layout="wide")
 
-# Charte graphique Ramery (docs/Charte graphique 2023.pdf), meme approche que
-# le projet middleware-ramery (streamlit_review/app.py) : logo integre en
-# base64 dans une div centree plutot que st.logo() (rendu plus fiable,
-# independant des data-testid internes de Streamlit qui changent de version
-# en version). Bleu corporate #003D7C force en CSS directement sur la
-# sidebar (jamais via secondaryBackgroundColor du theme, qui colore aussi
-# les champs de saisie de toute l'app - bug constate).
-LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
-
-
-def _logo_data_uri() -> str:
-    try:
-        data = base64.b64encode(LOGO_PATH.read_bytes()).decode()
-        return f"data:image/png;base64,{data}"
-    except OSError:
-        return ""
-
+# Charte graphique Ramery (docs/Charte graphique 2023.pdf). st.logo() est
+# repris ici (au lieu d'une image en HTML/base64) car c'est le seul moyen
+# fiable de placer le logo TOUT EN HAUT de la sidebar, au-dessus de la
+# navigation multipage generee automatiquement par Streamlit - un simple
+# st.sidebar.markdown() s'affiche toujours APRES cette navigation. Le
+# conteneur du logo cote frontend porte le testid "stSidebarLogo" (verifie
+# dans le bundle JS de streamlit) : on s'en sert pour le recadrer en rond.
+# Bleu corporate #003D7C force en CSS sur la sidebar (jamais via
+# secondaryBackgroundColor du theme, qui colore aussi les champs de saisie
+# de toute l'app - bug deja constate).
+st.logo(str(Path(__file__).resolve().parent / "assets" / "logo.png"))
 
 st.markdown(
     """
@@ -36,20 +29,25 @@ st.markdown(
     [data-testid="stSidebar"] { background-color: #003D7C; }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
 
-    .sidebar-header {
-        display: flex; justify-content: center; align-items: center;
-        padding: 6px 0 18px; margin-bottom: 10px;
+    [data-testid="stSidebarLogo"] {
+        display: flex; justify-content: center;
+        padding: 10px 0 18px;
         border-bottom: 1px solid rgba(255,255,255,.25);
     }
-    .sidebar-header img {
+    [data-testid="stSidebarLogo"] img {
         border-radius: 50%; border: 2px solid rgba(255,255,255,.4);
-        height: 70px; width: 70px; object-fit: cover;
+        height: 70px !important; width: 70px !important; object-fit: cover;
     }
 
-    /* Champs de saisie (recherche...) : sans cadre, blanc sur blanc se
-       confondait avec le fond de page - bordure bleue + coins arrondis
+    /* Champs de saisie et listes deroulantes : sans cadre, blanc sur blanc
+       se confondait avec le fond de page - bordure bleue + coins arrondis
        pour qu'on les distingue clairement comme des zones cliquables. */
     .stTextInput input {
+        border: 1px solid #003D7C !important;
+        border-radius: 6px !important;
+    }
+    [data-testid="stSelectbox"] > div > div,
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
         border: 1px solid #003D7C !important;
         border-radius: 6px !important;
     }
@@ -57,13 +55,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-_logo = _logo_data_uri()
-if _logo:
-    st.sidebar.markdown(
-        f'<div class="sidebar-header"><img src="{_logo}" alt="Ramery"/></div>',
-        unsafe_allow_html=True,
-    )
 
 
 @st.cache_resource
