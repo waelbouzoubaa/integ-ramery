@@ -21,7 +21,7 @@ st.set_page_config(page_title="Prix unitaires DQE", page_icon="📊", layout="wi
 # Bleu corporate #003D7C force en CSS sur la sidebar (jamais via
 # secondaryBackgroundColor du theme, qui colore aussi les champs de saisie
 # de toute l'app - bug deja constate).
-st.logo(str(Path(__file__).resolve().parent / "assets" / "logo.png"))
+st.logo(str(Path(__file__).resolve().parent / "assets" / "logo.png"), size="large")
 
 st.markdown(
     """
@@ -29,6 +29,11 @@ st.markdown(
     [data-testid="stSidebar"] { background-color: #003D7C; }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
 
+    /* st.logo() plafonne la hauteur de l'image a 32px max (size="large",
+       le maximum autorise) - forcer une taille plus grande via CSS (essaye
+       avant, 70px) fait deborder l'image de son conteneur et Streamlit la
+       masque entierement. On se limite donc a centrer + arrondir, sans
+       toucher a la taille. */
     [data-testid="stSidebarLogo"] {
         display: flex; justify-content: center;
         padding: 10px 0 18px;
@@ -36,7 +41,6 @@ st.markdown(
     }
     [data-testid="stSidebarLogo"] img {
         border-radius: 50%; border: 2px solid rgba(255,255,255,.4);
-        height: 70px !important; width: 70px !important; object-fit: cover;
     }
 
     /* Champs de saisie et listes deroulantes : sans cadre, blanc sur blanc

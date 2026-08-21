@@ -30,7 +30,7 @@ st.set_page_config(page_title="Recherche de prix", page_icon="🔎", layout="wid
 
 # Charte graphique Ramery : voir app.py pour le detail (st.logo() garantit
 # le placement tout en haut de la sidebar, au-dessus de la navigation).
-st.logo(str(Path(__file__).resolve().parents[1] / "assets" / "logo.png"))
+st.logo(str(Path(__file__).resolve().parents[1] / "assets" / "logo.png"), size="large")
 
 st.markdown(
     """
@@ -45,7 +45,6 @@ st.markdown(
     }
     [data-testid="stSidebarLogo"] img {
         border-radius: 50%; border: 2px solid rgba(255,255,255,.4);
-        height: 70px !important; width: 70px !important; object-fit: cover;
     }
 
     .stTextInput input {
