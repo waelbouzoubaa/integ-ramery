@@ -12,14 +12,28 @@ load_dotenv()
 st.set_page_config(page_title="Prix unitaires DQE", page_icon="📊", layout="wide")
 
 # Charte graphique Ramery (docs/Charte graphique 2023.pdf) : bleu corporate
-# #003D7C en fond de sidebar (voir .streamlit/config.toml), texte force en
-# blanc dans la sidebar car le theme Streamlit n'a qu'une seule couleur de
-# texte globale, qui doit rester sombre pour la page principale (fond blanc).
+# #003D7C force directement sur le fond de la sidebar (pas via
+# secondaryBackgroundColor du theme, qui colore aussi les champs de saisie
+# de toute l'app - bug constate : les barres de recherche devenaient bleues).
+# Texte de sidebar force en blanc (seule la sidebar a un fond sombre). Logo
+# centre et recadre en rond (CSS, le fichier source n'est pas forcement carre).
 st.logo(str(Path(__file__).resolve().parent / "assets" / "logo.png"))
 st.markdown(
     """
     <style>
+    [data-testid="stSidebar"] { background-color: #003D7C; }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
+    [data-testid="stSidebarHeader"] {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+    [data-testid="stSidebarHeader"] img, [data-testid="stLogo"] {
+        border-radius: 50%;
+        width: 90px;
+        height: 90px;
+        object-fit: cover;
+    }
     </style>
     """,
     unsafe_allow_html=True,
