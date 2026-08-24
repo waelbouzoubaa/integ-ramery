@@ -6,20 +6,14 @@ import streamlit as st
 
 st.set_page_config(page_title="Prix unitaires DQE", page_icon="📊", layout="wide")
 
-# Charte graphique Ramery (docs/Charte graphique 2023.pdf), sidebar reprise
-# a l'identique du projet middleware-ramery (streamlit_review/app.py) :
-# meme structure (logo + wordmark en haut, menu st.radio() stylise en nav
-# moderne - surbrillance + barre laterale sur l'item selectionne), au lieu
-# de st.navigation()/st.Page() qu'on utilisait avant. Avantage : plus besoin
-# de forcer l'ordre en CSS (pas de navigation auto-injectee par Streamlit a
-# contourner), et rendu identique aux autres apps Ramery.
-#
-# Note : la CSS de middleware-ramery masquait le rond natif du radio via des
-# classes "st-emotion-cache-XXXX" generees par Streamlit - verifie non
-# transposable ici (classes differentes selon la version de Streamlit
-# installee). On garde uniquement les selecteurs stables (data-testid,
-# [role="radiogroup"], :has(input:checked)) qui ne changent pas de version
-# en version.
+# Charte graphique Ramery (docs/Charte graphique 2023.pdf), structure de
+# sidebar reprise du projet middleware-ramery (streamlit_review/app.py) :
+# logo + wordmark en haut, puis menu st.radio() - au lieu de
+# st.navigation()/st.Page() qu'on utilisait avant. Avantage : plus besoin de
+# forcer l'ordre en CSS (pas de navigation auto-injectee par Streamlit a
+# contourner). Le radio garde son apparence normale (pas de surbrillance/
+# barre laterale personnalisee) - demande explicite, contrairement au rendu
+# stylise de middleware-ramery.
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
 VUES_DIR = Path(__file__).resolve().parent / "vues"
 
@@ -40,22 +34,6 @@ st.markdown(
     [data-testid="stSidebar"] { background: linear-gradient(180deg, #003D7C 0%, #00295C 100%); }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
     [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.22); }
-
-    [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] label {
-        padding: 8px 12px; border-radius: 8px; margin-bottom: 2px;
-        border-left: 3px solid transparent;
-        transition: background .15s, border-color .15s;
-    }
-    [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] label:hover {
-        background: rgba(255,255,255,.08);
-    }
-    [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) {
-        background: rgba(255,255,255,.18);
-        border-left: 3px solid #FFFFFF;
-    }
-    [data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) p {
-        font-weight: 700 !important;
-    }
 
     .sidebar-header {
         display: flex; flex-direction: column; align-items: center; gap: 10px;
