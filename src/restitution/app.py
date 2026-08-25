@@ -104,6 +104,7 @@ if _logo:
     )
 
 PAGES = {
+    "📈 Tableau de bord": "tableau_de_bord.py",
     "📊 Prix unitaires": "prix_unitaires.py",
     "🔍 Revue des groupes": "revue_des_groupes.py",
     "🔎 Recherche de prix": "recherche_de_prix.py",
