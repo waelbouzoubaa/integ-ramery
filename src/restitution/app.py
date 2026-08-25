@@ -11,9 +11,14 @@ st.set_page_config(page_title="Prix unitaires DQE", page_icon="📊", layout="wi
 # logo + wordmark en haut, puis menu st.radio() - au lieu de
 # st.navigation()/st.Page() qu'on utilisait avant. Avantage : plus besoin de
 # forcer l'ordre en CSS (pas de navigation auto-injectee par Streamlit a
-# contourner). Le radio garde son apparence normale (pas de surbrillance/
-# barre laterale personnalisee) - demande explicite, contrairement au rendu
-# stylise de middleware-ramery.
+# contourner).
+#
+# Rond natif du radio masque : verifie dans le bundle JS Streamlit
+# (Radio.*.js) que chaque option a la structure interne
+# ligne > [rond, texte] (rond = 1er enfant, texte = 2e) - contrairement
+# a middleware-ramery, on ne peut pas cibler leur classe emotion-cache
+# (absente de notre version), donc on cible cette position structurelle
+# a la place (independant de la version Streamlit installee).
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
 VUES_DIR = Path(__file__).resolve().parent / "vues"
 
@@ -34,6 +39,26 @@ st.markdown(
     [data-testid="stSidebar"] { background: linear-gradient(180deg, #003D7C 0%, #00295C 100%); }
     [data-testid="stSidebar"] * { color: #FFFFFF !important; }
     [data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.22); }
+
+    /* Rond natif du radio masque (voir note ci-dessus) */
+    [data-testid="stRadioOption"] > div > div > div:first-child {
+        display: none !important;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+        padding: 8px 12px; border-radius: 8px; margin-bottom: 2px;
+        border-left: 3px solid transparent;
+        transition: background .15s, border-color .15s;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+        background: rgba(255,255,255,.08);
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+        background: rgba(255,255,255,.18);
+        border-left: 3px solid #FFFFFF;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) p {
+        font-weight: 700 !important;
+    }
 
     .sidebar-header {
         display: flex; flex-direction: column; align-items: center; gap: 10px;
