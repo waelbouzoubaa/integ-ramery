@@ -1,11 +1,35 @@
 import os
 
+import altair as alt
 import pandas as pd
 import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _camembert(donnees: dict[str, int], titre: str):
+    """Camembert Altair (mark_arc) - pas de st.pie_chart natif chez
+    Streamlit, mais altair est deja une dependance de streamlit (aucun
+    ajout necessaire)."""
+    df = pd.DataFrame({"categorie": list(donnees.keys()), "valeur": list(donnees.values())})
+    chart = (
+        alt.Chart(df)
+        .mark_arc(outerRadius=110)
+        .encode(
+            theta=alt.Theta("valeur:Q"),
+            color=alt.Color(
+                "categorie:N",
+                scale=alt.Scale(range=["#003D7C", "#B8C9DC"]),
+                legend=alt.Legend(title=None),
+            ),
+            tooltip=["categorie:N", "valeur:Q"],
+        )
+        .properties(title=titre, height=280)
+    )
+    text = chart.mark_text(radius=135, size=13).encode(text="valeur:Q")
+    st.altair_chart(chart + text, use_container_width=True)
 
 
 @st.cache_resource
@@ -92,13 +116,31 @@ with col_gauche:
 with col_droite:
     st.subheader("Groupes : validés vs en attente")
     st.caption("Un groupe 'en attente' n'a pas encore été confirmé par un humain (score de confiance sous le seuil d'auto-validation).")
-    repartition_groupes = pd.Series(
+    _camembert(
         {
             "Validés": int(stats["groupes_valides"]),
             "En attente": int(stats["total_groupes"]) - int(stats["groupes_valides"]),
-        }
+        },
+        "Groupes",
     )
-    st.bar_chart(repartition_groupes)
+
+st.divider()
+
+st.subheader("Désignations : avec groupe vs sans groupe")
+st.caption(
+    f"Sur les {int(stats['total_designations'])} désignations du tableau principal, combien "
+    "correspondent à un groupe formé (plusieurs orthographes fusionnées) contre combien "
+    "n'ont qu'une seule orthographe existante (rien à fusionner, pas forcément un problème)."
+)
+col_pie1, col_pie2, _ = st.columns([1, 1, 1])
+with col_pie1:
+    _camembert(
+        {
+            "Avec groupe": int(stats["total_groupes"]),
+            "Sans groupe": int(stats["designations_sans_groupe"]),
+        },
+        "Désignations",
+    )
 
 st.divider()
 
