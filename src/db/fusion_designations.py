@@ -30,12 +30,26 @@ import psycopg
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from google.genai.errors import ServerError
 from pydantic import BaseModel
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 load_dotenv()
 
 SEUIL_PRE_FILTRE = 0.5  # en dessous, on ne derange meme pas Gemini
 TAILLE_LOT = 40         # paires par appel Gemini
+
+# Gemini renvoie parfois une 503 "high demand... usually temporary" (constate
+# en pratique : fusion plantee au bout de 10 min sur un gros lot, page
+# Streamlit entiere cassee). Reessaie avec un delai croissant (4s, 8s, 16s,
+# 32s, 60s, 60s) avant d'abandonner - largement le temps qu'un pic de charge
+# passager se resorbe.
+_retry_surcharge = retry(
+    retry=retry_if_exception_type(ServerError),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    stop=stop_after_attempt(6),
+    reraise=True,
+)
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
@@ -92,6 +106,7 @@ class ScoreConfiance(BaseModel):
     score: float
 
 
+@_retry_surcharge
 def evaluer_confiance_groupe(client: genai.Client, sous_famille, unite, designations: list[str]) -> float:
     """Un seul appel Gemini par GROUPE (pas par paire) : evalue la coherence
     d'ensemble du groupe. Le score sert de seuil_confiance pour le matching
@@ -192,6 +207,7 @@ def choisir_canonique(membres, occurrences):
     return sorted(membres, key=lambda m: (-occurrences[m], len(m[2])))[0][2]
 
 
+@_retry_surcharge
 def valider_par_lot(client: genai.Client, lot: list[tuple]) -> list[bool]:
     """lot = liste de (sous_famille, unite, designation_a, designation_b).
     Renvoie une liste de booleens fusionner/pas, dans le meme ordre."""
