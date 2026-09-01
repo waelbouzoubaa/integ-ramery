@@ -60,6 +60,14 @@ stats = pd.read_sql(
         (SELECT count(*) FROM prix_moyen_par_designation)                    AS total_designations,
         (SELECT count(*) FROM groupes)                                       AS total_groupes,
         (SELECT count(*) FROM groupes WHERE valide)                          AS groupes_valides,
+        -- membres_signature contient "|" uniquement quand 2+ orthographes
+        -- distinctes ont ete fusionnees (voir fusion_designations.py) - sans
+        -- "|", le groupe n'a qu'une seule orthographe repetee (rien a
+        -- decider, auto-valide SANS Gemini). Les deux comptent comme un
+        -- "groupe" (2+ designations, meme orthographe ou pas), mais seul le
+        -- premier cas a reellement necessite un jugement Gemini.
+        (SELECT count(*) FROM groupes WHERE membres_signature LIKE '%|%')     AS groupes_avec_gemini,
+        (SELECT count(*) FROM groupes WHERE membres_signature NOT LIKE '%|%') AS groupes_sans_gemini,
         (SELECT count(*) FROM prix_moyen_par_designation v
          WHERE NOT EXISTS (
              SELECT 1 FROM groupes g
@@ -75,7 +83,11 @@ stats = pd.read_sql(
 st.subheader("Vue d'ensemble")
 c1, c2, c3 = st.columns(3)
 c1.metric("Désignations (total)", int(stats["total_designations"]))
-c2.metric("Groupes formés", int(stats["total_groupes"]))
+c2.metric(
+    "Groupes formés",
+    int(stats["total_groupes"]),
+    help="Inclut les groupes formés par Gemini (orthographes différentes) ET les désignations juste répétées à l'identique - voir le détail des deux ci-dessous.",
+)
 c3.metric("Désignations sans groupe", int(stats["designations_sans_groupe"]))
 
 c4, c5, c6 = st.columns(3)
@@ -87,6 +99,18 @@ c4.metric(
 )
 c5.metric("Anomalies de prix détectées", int(stats["anomalies"]))
 c6.metric("Lignes de prix brutes", int(stats["total_lignes"]), help=f"Extraites de {int(stats['total_documents'])} document(s)")
+
+c7, c8, _ = st.columns(3)
+c7.metric(
+    "Groupes ayant nécessité Gemini",
+    int(stats["groupes_avec_gemini"]),
+    help="2+ orthographes différentes réellement fusionnées après un jugement Gemini (ou une normalisation exacte suivie d'une évaluation de cohérence).",
+)
+c8.metric(
+    "Groupes sans Gemini (même orthographe)",
+    int(stats["groupes_sans_gemini"]),
+    help="Une seule orthographe, répétée sur plusieurs lignes - rien à décider, auto-validé sans appel Gemini.",
+)
 
 st.divider()
 
@@ -132,11 +156,13 @@ st.caption(
     "correspondent à un groupe formé (plusieurs orthographes fusionnées) contre combien "
     "n'ont qu'une seule orthographe existante (rien à fusionner, pas forcément un problème)."
 )
+designations_avec_groupe = int(stats["total_designations"]) - int(stats["designations_sans_groupe"])
+
 col_pie1, col_pie2, _ = st.columns([1, 1, 1])
 with col_pie1:
     _camembert(
         {
-            "Avec groupe": int(stats["total_groupes"]),
+            "Avec groupe": designations_avec_groupe,
             "Sans groupe": int(stats["designations_sans_groupe"]),
         },
         "Désignations",
@@ -157,3 +183,50 @@ top_sf = pd.read_sql(
     conn,
 ).set_index("sous_famille")
 st.bar_chart(top_sf)
+
+st.divider()
+
+# Journal de tous les fichiers passes par le watcher : succes (price_documents,
+# avec le nombre de lignes extraites) UNION echecs non resolus
+# (echecs_traitement - voir schema.sql). filename est stocke SANS extension
+# cote succes (load_items utilise Path(name).stem) et AVEC cote echec (le nom
+# brut du fichier SharePoint) - on retire l'extension des deux pour un
+# affichage coherent.
+journal_df = pd.read_sql(
+    """
+    SELECT filename, statut, nb_lignes, date_evenement FROM (
+        SELECT pd.filename                                AS filename,
+               'Traité'                                    AS statut,
+               count(pl.id)                                AS nb_lignes,
+               pd.imported_at                               AS date_evenement
+        FROM price_documents pd
+        LEFT JOIN price_lines pl ON pl.document_id = pd.id
+        GROUP BY pd.id, pd.filename, pd.imported_at
+
+        UNION ALL
+
+        SELECT regexp_replace(filename, '\\.pdf$', '', 'i')  AS filename,
+               'Échec'                                       AS statut,
+               NULL                                          AS nb_lignes,
+               survenu_le                                    AS date_evenement
+        FROM echecs_traitement
+        WHERE NOT resolu
+    ) t
+    ORDER BY date_evenement DESC
+    """,
+    conn,
+)
+
+st.subheader("Journal des fichiers traités")
+st.metric("Fichiers traités au total", len(journal_df))
+st.dataframe(
+    journal_df,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "filename": "Fichier",
+        "statut": "Statut",
+        "nb_lignes": "Lignes extraites",
+        "date_evenement": st.column_config.DatetimeColumn("Date", format="DD/MM/YYYY HH:mm"),
+    },
+)

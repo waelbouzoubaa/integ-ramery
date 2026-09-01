@@ -83,6 +83,7 @@ def _arbitrer_par_lot(lot: list[tuple]) -> dict[int, int]:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=ChoixRapprochements,
+            temperature=0,
         ),
     )
     result = response.parsed if response.parsed is not None else ChoixRapprochements.model_validate_json(response.text)
@@ -182,7 +183,16 @@ if fichier is not None:
 
         # Etape 1 : pre-filtre rapide et gratuit (texte + unite + memes nombres)
         # pour chaque ligne, sans encore rien decider - juste raccourcir la liste
-        # avant de deranger Gemini (jamais toute la base, seulement le top 5).
+        # avant de deranger Gemini (jamais toute la base, seulement un top 5
+        # final). On tire un pool plus large (20) AVANT le filtre memes_nombres,
+        # pas apres : la similarite texte seule ne "sait" pas qu'un nombre
+        # partage compte plus qu'une ressemblance generale de mots - un
+        # candidat avec le bon nombre mais un score texte plus bas peut se
+        # faire evincer du top 5 par plusieurs candidats au texte proche mais
+        # au nombre different (donc de toute facon rejetes par memes_nombres
+        # ensuite). Bug reel constate : "bordure...type T2 <50ml" - le bon
+        # candidat scorait 0.38, mais 4 candidats a 0.6+ (sans le "50")
+        # rentraient dans un LIMIT 5 et l'evincaient completement.
         candidats_par_item = []
         n_items = len(resultat.items)
         barre_preselection = st.progress(0.0, text="Présélection des candidats...")
@@ -194,11 +204,12 @@ if fichier is not None:
                 FROM prix_moyen_par_designation
                 WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
                 ORDER BY score DESC
-                LIMIT 5
+                LIMIT 20
                 """,
                 conn, params=(item.designation, item.unite),
             )
             candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
+            candidats = candidats.sort_values("score", ascending=False).head(5)
             candidats_par_item.append(candidats.reset_index(drop=True))
             barre_preselection.progress(
                 (idx + 1) / n_items, text=f"Présélection des candidats... ({idx + 1}/{n_items})"
@@ -250,8 +261,13 @@ if fichier is not None:
                     "prix_moyen_corrige": float(r["prix_moyen_corrige"]),
                     "nb_occurrences": int(r["nb_occurrences"]),
                     "score_correspondance": round(float(r["score"]), 2),
+                    "raison_echec": None,
                 })
             else:
+                if candidats.empty:
+                    raison = "Aucun candidat présélectionné (texte, unité ou nombres différents)"
+                else:
+                    raison = f"Gemini a rejeté les {len(candidats)} candidat(s) présélectionné(s)"
                 lignes_resultat.append({
                     "designation_bordereau": item.designation,
                     "unite": item.unite,
@@ -260,6 +276,7 @@ if fichier is not None:
                     "prix_moyen_corrige": None,
                     "nb_occurrences": None,
                     "score_correspondance": None,
+                    "raison_echec": raison,
                 })
 
         # Resultat mis en cache dans la session : les prochains re-runs du
@@ -275,11 +292,13 @@ if fichier is not None:
     nb_trouves = int(df_resultat["prix_moyen_corrige"].notna().sum())
     st.write(f"**{nb_trouves} / {len(df_resultat)}** désignations rapprochées avec succès.")
     if nb_trouves < len(df_resultat):
+        nb_sans_candidat = int(df_resultat["raison_echec"].str.startswith("Aucun candidat", na=False).sum())
+        nb_rejetes_gemini = int(df_resultat["raison_echec"].str.startswith("Gemini a rejeté", na=False).sum())
         st.caption(
-            "Les lignes sans correspondance (aucun candidat présélectionné, "
-            "ou Gemini a jugé qu'aucun candidat ne correspondait vraiment) "
-            "restent affichées ci-dessous pour que rien ne disparaisse "
-            "silencieusement — à compléter manuellement."
+            f"Sur les {len(df_resultat) - nb_trouves} lignes sans correspondance : "
+            f"{nb_sans_candidat} n'avaient aucun candidat présélectionné (texte/unité/nombres), "
+            f"{nb_rejetes_gemini} avaient des candidats mais Gemini a jugé qu'aucun ne correspondait vraiment. "
+            "Elles restent affichées ci-dessous pour que rien ne disparaisse silencieusement — à compléter manuellement."
         )
 
     st.dataframe(
@@ -294,6 +313,7 @@ if fichier is not None:
             "prix_moyen_corrige": st.column_config.NumberColumn("Prix moyen corrigé (€)", format="%.2f"),
             "nb_occurrences": "Occurrences (base)",
             "score_correspondance": st.column_config.NumberColumn("Score de similarité", format="%.2f"),
+            "raison_echec": "Raison (si non trouvé)",
         },
     )
 

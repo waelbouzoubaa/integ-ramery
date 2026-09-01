@@ -90,8 +90,30 @@ if "fusion_output" in st.session_state:
 
 st.divider()
 
+# Un groupe dont membres_signature ne contient aucun "|" n'a qu'une seule
+# orthographe (voir fusion_designations.py) : rien a decider, juste une
+# designation repetee sur plusieurs lignes, auto-validee SANS appel Gemini.
+# Par defaut on ne montre que les groupes ayant reellement necessite un
+# jugement Gemini (a l'echelle de milliers de fichiers, les repetitions
+# triviales noieraient sinon les groupes qui ont besoin d'un regard humain) -
+# le filtre permet de voir les deux categories separement, ou tout ensemble.
+FILTRE_GEMINI = "Groupes ayant nécessité Gemini (orthographes différentes)"
+FILTRE_SANS_GEMINI = "Groupes sans validation IA (même orthographe répétée)"
+FILTRE_TOUS = "Tous les groupes"
+
+filtre = st.radio(
+    "Filtrer par",
+    [FILTRE_GEMINI, FILTRE_SANS_GEMINI, FILTRE_TOUS],
+    horizontal=True,
+)
+condition_sql = {
+    FILTRE_GEMINI: "g.membres_signature LIKE '%|%'",
+    FILTRE_SANS_GEMINI: "g.membres_signature NOT LIKE '%|%'",
+    FILTRE_TOUS: "true",
+}[filtre]
+
 groupes_df = pd.read_sql(
-    """
+    f"""
     SELECT g.id, g.designation_canonique, g.sous_famille, g.unite,
            g.valide, g.seuil_confiance,
            count(pl.id)                                AS nb_membres,
@@ -99,8 +121,9 @@ groupes_df = pd.read_sql(
     FROM groupes g
     JOIN price_lines pl
       ON coalesce(pl.designation_canonique, pl.designation) = g.designation_canonique
-     AND pl.sous_famille IS NOT DISTINCT FROM g.sous_famille
+     AND pl.sous_famille_canonique IS NOT DISTINCT FROM g.sous_famille
      AND pl.unite_canonique IS NOT DISTINCT FROM g.unite
+    WHERE {condition_sql}
     GROUP BY g.id, g.designation_canonique, g.sous_famille, g.unite, g.valide, g.seuil_confiance
     ORDER BY g.valide ASC, nb_en_attente DESC, nb_membres DESC
     """,
@@ -153,7 +176,7 @@ membres_df = pd.read_sql(
     FROM price_lines pl
     JOIN price_documents pd ON pd.id = pl.document_id
     WHERE coalesce(pl.designation_canonique, pl.designation) = %s
-      AND pl.sous_famille IS NOT DISTINCT FROM %s
+      AND pl.sous_famille_canonique IS NOT DISTINCT FROM %s
       AND pl.unite_canonique IS NOT DISTINCT FROM %s
     ORDER BY pl.en_attente DESC, pl.prix_unitaire
     """,
@@ -201,7 +224,7 @@ with col_valider:
                 UPDATE price_lines
                 SET fusion_manuelle = true, en_attente = false
                 WHERE coalesce(designation_canonique, designation) = %s
-                  AND sous_famille IS NOT DISTINCT FROM %s
+                  AND sous_famille_canonique IS NOT DISTINCT FROM %s
                   AND unite_canonique IS NOT DISTINCT FROM %s
                 """,
                 (canon, sf, u),

@@ -141,7 +141,7 @@ if not df.empty:
         FROM price_lines pl
         JOIN price_documents pd ON pd.id = pl.document_id
         WHERE coalesce(pl.designation_canonique, pl.designation) = %s
-          AND pl.sous_famille IS NOT DISTINCT FROM %s
+          AND pl.sous_famille_canonique IS NOT DISTINCT FROM %s
           AND pl.unite_canonique IS NOT DISTINCT FROM %s
         ORDER BY pl.prix_unitaire
     """
