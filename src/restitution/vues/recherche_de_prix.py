@@ -24,7 +24,7 @@ if str(DB_DIR) not in sys.path:
     sys.path.insert(0, str(DB_DIR))
 
 from gemini_extract import extract_pdf_sans_prix  # noqa: E402
-from fusion_designations import memes_nombres  # noqa: E402
+from fusion_designations import _sens_comparaison, memes_nombres  # noqa: E402
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 TAILLE_LOT = 20  # lignes de bordereau par appel Gemini (garde le prompt raisonnable)
@@ -184,15 +184,17 @@ if fichier is not None:
         # Etape 1 : pre-filtre rapide et gratuit (texte + unite + memes nombres)
         # pour chaque ligne, sans encore rien decider - juste raccourcir la liste
         # avant de deranger Gemini (jamais toute la base, seulement un top 5
-        # final). On tire un pool plus large (20) AVANT le filtre memes_nombres,
-        # pas apres : la similarite texte seule ne "sait" pas qu'un nombre
-        # partage compte plus qu'une ressemblance generale de mots - un
-        # candidat avec le bon nombre mais un score texte plus bas peut se
-        # faire evincer du top 5 par plusieurs candidats au texte proche mais
-        # au nombre different (donc de toute facon rejetes par memes_nombres
-        # ensuite). Bug reel constate : "bordure...type T2 <50ml" - le bon
-        # candidat scorait 0.38, mais 4 candidats a 0.6+ (sans le "50")
-        # rentraient dans un LIMIT 5 et l'evincaient completement.
+        # final). Le filtre "memes nombres" est applique DANS le SQL
+        # (nombres_texte), AVANT le LIMIT : la similarite texte seule ne "sait"
+        # pas qu'un nombre different disqualifie un candidat - avec un LIMIT
+        # applique avant ce filtre, un bon candidat au texte moins proche se
+        # faisait evincer du top-N par des candidats au texte proche mais au
+        # mauvais nombre, de toute facon rejetes ensuite. Bugs reels : "bordure
+        # ...type T2 <50ml" (bon candidat a 0.38 evince d'un top 5 par des 0.6+
+        # sans le "50"), puis "Canalisation PVC CR 8 Ø 125" (bon candidat
+        # "tuyaux PVC Ø125 CR8" encore evince d'un top 20 par des canalisations
+        # aux autres diametres). memes_nombres reste applique cote Python pour
+        # le sens de comparaison ("<2,50" vs ">2,50"), que le SQL ne voit pas.
         candidats_par_item = []
         n_items = len(resultat.items)
         barre_preselection = st.progress(0.0, text="Présélection des candidats...")
@@ -203,13 +205,52 @@ if fichier is not None:
                        similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
                 FROM prix_moyen_par_designation
                 WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
+                  AND nombres_texte(designation) = nombres_texte(%s)
                 ORDER BY score DESC
                 LIMIT 20
                 """,
-                conn, params=(item.designation, item.unite),
+                conn, params=(item.designation, item.unite, item.designation),
             )
-            candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
-            candidats = candidats.sort_values("score", ascending=False).head(5)
+            # Sur un resultat vide, pd.read_sql + psycopg renvoie un DataFrame
+            # sans colonnes -> sort_values("score") leverait un KeyError.
+            if not candidats.empty:
+                candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
+                candidats = candidats.sort_values("score", ascending=False).head(5)
+
+            # Rattrapage : si l'egalite stricte des nombres ne donne AUCUN
+            # candidat, retenter en INCLUSION (nombres du candidat ⊆ nombres du
+            # bordereau). Cas reel : une ligne porteuse d'une borne de quantite
+            # ou de montant ("Grave 0/31.5 recyclee (<250T)", "Travaux compris
+            # entre 1500 et 5000 €") ne trouvait JAMAIS rien - le seuil
+            # tarifaire (250, 1500...) n'existe pas dans les designations en
+            # base. Sur le bordereau test, 22 des 36 lignes "aucun candidat"
+            # portaient une telle borne. Un candidat qui OMET un nombre du
+            # bordereau reste plausible (il n'affirme rien de contradictoire),
+            # contrairement a un candidat au nombre DIFFERENT - et Gemini
+            # arbitre toujours (jamais d'auto-accept ici : texte jamais
+            # identique par construction). Le sens de comparaison reste
+            # bloquant ("<2,50" ne matche pas ">2,50").
+            if candidats.empty:
+                candidats = pd.read_sql(
+                    """
+                    SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
+                           similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
+                    FROM prix_moyen_par_designation
+                    WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
+                      AND nombres_tab(designation) <@ nombres_tab(%s)
+                    ORDER BY score DESC
+                    LIMIT 5
+                    """,
+                    conn, params=(item.designation, item.unite, item.designation),
+                )
+                if not candidats.empty:
+                    sens_bordereau = _sens_comparaison(item.designation)
+                    candidats = candidats[candidats["designation"].apply(
+                        lambda d: sens_bordereau is None
+                        or _sens_comparaison(d) is None
+                        or _sens_comparaison(d) == sens_bordereau
+                    )]
+
             candidats_par_item.append(candidats.reset_index(drop=True))
             barre_preselection.progress(
                 (idx + 1) / n_items, text=f"Présélection des candidats... ({idx + 1}/{n_items})"

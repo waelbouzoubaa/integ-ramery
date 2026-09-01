@@ -32,6 +32,42 @@ LANGUAGE sql IMMUTABLE AS $$
     )
 $$;
 
+-- Ensemble des nombres d'un texte, sous forme canonique comparable ("0,125,8"
+-- pour "PVC CR 8 Ø 125") : suites de chiffres, dedupliquees et triees.
+-- Equivalent SQL exact de set(_NUM_RE.findall(...)) de fusion_designations.py
+-- (comparaison de CHAINES : "05" et "5" restent distincts, comme en Python).
+-- Sert au prefiltre de "Recherche de prix" a filtrer les candidats sur les
+-- memes nombres AVANT le LIMIT du top-N par similarite texte : la similarite
+-- texte seule ne "sait" pas qu'un nombre different disqualifie un candidat -
+-- avec un LIMIT applique avant ce filtre, les bons candidats (memes nombres,
+-- texte moins proche) se faisaient evincer du top-N par des candidats au
+-- texte proche mais au mauvais nombre, de toute facon rejetes ensuite.
+CREATE OR REPLACE FUNCTION nombres_texte(t text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT coalesce(
+        (SELECT string_agg(DISTINCT m[1], ',' ORDER BY m[1])
+         FROM regexp_matches(t, '\d+', 'g') m),
+        ''
+    )
+$$;
+
+-- Meme extraction, en tableau, pour les comparaisons d'INCLUSION (operateur
+-- <@) et pas seulement d'egalite. Sert au "rattrapage" de la Recherche de
+-- prix : une ligne de bordereau porteuse d'une borne de quantite/montant
+-- ("Grave 0/31.5 recyclee (<250T)", "Travaux compris entre 1500 et 5000 €")
+-- ne trouve JAMAIS de candidat en egalite stricte des nombres - le seuil
+-- tarifaire (250, 1500...) n'existe pas dans la designation en base
+-- ("Grave Non Traitee de recyclage 0/31.5"). Un candidat dont les nombres
+-- sont un SOUS-ENSEMBLE de ceux du bordereau reste un rapprochement
+-- plausible (il n'affirme rien de contradictoire), que Gemini arbitre.
+CREATE OR REPLACE FUNCTION nombres_tab(t text) RETURNS text[]
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT coalesce(
+        (SELECT array_agg(DISTINCT m[1]) FROM regexp_matches(t, '\d+', 'g') m),
+        '{}'::text[]
+    )
+$$;
+
 -- Normalise une unite pour qu'elle serve de cle de regroupement fiable :
 -- minuscules, accents et exposants retires (m2/M2/m² -> "m2"), ponctuation
 -- et espaces retires (FT / ft / F.T. -> "ft"). Sans ca, la meme unite
@@ -58,21 +94,52 @@ $$;
 -- parfaitement identique en base, uniquement a cause de cette variation
 -- d'ecriture entre deux lignes du MEME document.
 -- IMMUTABLE : requis pour l'utiliser dans une colonne generee (voir plus bas).
+-- Apres le nettoyage, les SYNONYMES d'ecriture d'une meme unite sont ramenes
+-- a une forme canonique unique. Meme logique que ml -> m (metre lineaire =
+-- metre pour un article lineaire, deux conventions d'ecriture) : en base
+-- reelle, la famille "forfait" etait eclatee en 7 ecritures (ft 563
+-- designations, f 114, forfait 37, fft, for, forf, ff) et "unite" en 6 (u
+-- 2045, unitaire 45, lunite, unite, un, piece) - le meme produit au meme
+-- forfait ne se retrouvait JAMAIS si un document ecrivait "F" et l'autre
+-- "FT". Les libelles verbeux ("Le metre carre" -> "lemetrecarre") viennent
+-- de PDF qui ecrivent l'unite en toutes lettres.
+-- "ens"/"ensemble" sont unifies entre eux mais PAS avec "forfait" :
+-- volontairement conservateur, "l'ensemble" peut porter un sens metier
+-- distinct (l'ensemble des unites d'un lot) qu'on ne tranche pas ici.
 CREATE OR REPLACE FUNCTION normaliser_unite(u text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
     SELECT NULLIF(
-        CASE WHEN regexp_replace(
-                translate(lower(trim(u)), 'àâäéèêëîïôöùûüç²³', 'aaaeeeeiioouuuc23'),
-                '[^a-z0-9/%]', '', 'g'
-             ) = 'ml'
-             THEN 'm'
-             ELSE regexp_replace(
-                translate(lower(trim(u)), 'àâäéèêëîïôöùûüç²³', 'aaaeeeeiioouuuc23'),
-                '[^a-z0-9/%]', '', 'g'
-             )
+        CASE nettoye
+            WHEN 'ml'           THEN 'm'
+            WHEN 'lemetre'      THEN 'm'
+            WHEN 'lemetrecarre' THEN 'm2'
+            WHEN 'lemetrecube'  THEN 'm3'
+            WHEN 'latonne'      THEN 't'
+            WHEN 'tonne'        THEN 't'
+            WHEN 'f'            THEN 'forfait'
+            WHEN 'ft'           THEN 'forfait'
+            WHEN 'fft'          THEN 'forfait'
+            WHEN 'ff'           THEN 'forfait'
+            WHEN 'for'          THEN 'forfait'
+            WHEN 'forf'         THEN 'forfait'
+            WHEN 'unitaire'     THEN 'u'
+            WHEN 'unite'        THEN 'u'
+            WHEN 'lunite'       THEN 'u'
+            WHEN 'un'           THEN 'u'
+            WHEN 'piece'        THEN 'u'
+            WHEN 'pieces'       THEN 'u'
+            WHEN 'ensemble'     THEN 'ens'
+            WHEN 'heure'        THEN 'h'
+            ELSE nettoye
         END,
         ''
     )
+    FROM (
+        SELECT regexp_replace(
+            translate(lower(trim(u)), 'àâäéèêëîïôöùûüç²³', 'aaaeeeeiioouuuc23'),
+            '[^a-z0-9/%]', '', 'g'
+        ) AS nettoye
+    ) s
 $$;
 
 -- Normalise une sous_famille pour qu'elle serve de cle de regroupement fiable,
