@@ -57,6 +57,19 @@ de pose) rend deux désignations NON équivalentes, même si le texte se
 ressemble beaucoup. Dans le doute, réponds qu'aucun candidat ne correspond
 plutôt que de choisir au hasard.
 
+Nuance importante : un candidat plus DÉTAILLÉ que la ligne du bordereau,
+mais sans contradiction avec elle, décrit le MÊME produit — accepte-le.
+Exemples réels : "Tête d'aqueduc de sécurité Ø < 400 mm" pour "Tête
+d'aqueduc pour Ø < 400 mm" ; "peinture thermoplastique blanche" pour "en
+peinture" ; "Grave Non Traitée type B (GNT 2) 0/31.5" pour "GNT 2 (GNT B)
+0/31.5" ; "About fonte type T" pour "About en fonte de type T ou A".
+Rejette uniquement en cas de contradiction réelle : matériau différent
+(fonte vs PVC, peinture vs résine, béton vs résine), classe ou type
+différent (CC2 vs CS2, simple vs double gravillonnage), fourni vs
+réutilisé, opération différente (dépose vs fourniture, démolition vs
+réfection), ou prestation supplémentaire qui change le prix (ex : "y
+compris tranchée" quand le bordereau ne la demande pas).
+
 Réponds pour CHAQUE id reçu, dans le même ordre : l'index (0-based) du bon
 candidat dans SA liste, ou -1 si aucun candidat ne correspond."""
 

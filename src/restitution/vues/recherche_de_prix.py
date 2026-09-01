@@ -42,6 +42,19 @@ de pose) rend deux désignations NON équivalentes, même si le texte se
 ressemble beaucoup. Dans le doute, réponds qu'aucun candidat ne correspond
 plutôt que de choisir au hasard.
 
+Nuance importante : un candidat plus DÉTAILLÉ que la ligne du bordereau,
+mais sans contradiction avec elle, décrit le MÊME produit — accepte-le.
+Exemples réels : "Tête d'aqueduc de sécurité Ø < 400 mm" pour "Tête
+d'aqueduc pour Ø < 400 mm" ; "peinture thermoplastique blanche" pour "en
+peinture" ; "Grave Non Traitée type B (GNT 2) 0/31.5" pour "GNT 2 (GNT B)
+0/31.5" ; "About fonte type T" pour "About en fonte de type T ou A".
+Rejette uniquement en cas de contradiction réelle : matériau différent
+(fonte vs PVC, peinture vs résine, béton vs résine), classe ou type
+différent (CC2 vs CS2, simple vs double gravillonnage), fourni vs
+réutilisé, opération différente (dépose vs fourniture, démolition vs
+réfection), ou prestation supplémentaire qui change le prix (ex : "y
+compris tranchée" quand le bordereau ne la demande pas).
+
 Réponds pour CHAQUE id reçu, dans le même ordre : l'index (0-based) du bon
 candidat dans SA liste, ou -1 si aucun candidat ne correspond."""
 
@@ -307,12 +320,24 @@ if fichier is not None:
                     "nb_occurrences": int(r["nb_occurrences"]),
                     "score_correspondance": round(float(r["score"]), 2),
                     "raison_echec": None,
+                    "proposition_a_valider": None,
+                    "prix_proposition": None,
                 })
             else:
                 if candidats.empty:
                     raison = "Aucun candidat présélectionné (texte, unité ou nombres différents)"
                 else:
                     raison = f"Gemini a rejeté les {len(candidats)} candidat(s) présélectionné(s)"
+                # Sur un rejet, on affiche quand meme le MEILLEUR candidat et
+                # son prix comme PROPOSITION a valider par un humain - jamais
+                # comptee comme rapprochee (prix_moyen_corrige reste vide),
+                # jamais choisie automatiquement. L'analyse des rejets a montre
+                # deux populations : des rejets legitimes (produit absent de la
+                # base) et des rejets prudents ou le bon candidat etait la
+                # ("Tete d'aqueduc de securite..." pour "Tete d'aqueduc...") -
+                # dans les deux cas, montrer la meilleure piste transforme une
+                # recherche manuelle en simple validation d'un coup d'oeil.
+                meilleur = candidats.iloc[0] if not candidats.empty else None
                 lignes_resultat.append({
                     "designation_bordereau": item.designation,
                     "unite": item.unite,
@@ -322,6 +347,8 @@ if fichier is not None:
                     "nb_occurrences": None,
                     "score_correspondance": None,
                     "raison_echec": raison,
+                    "proposition_a_valider": None if meilleur is None else meilleur["designation"],
+                    "prix_proposition": None if meilleur is None else float(meilleur["prix_moyen_corrige"]),
                 })
 
         # Resultat mis en cache dans la session : les prochains re-runs du
@@ -343,7 +370,8 @@ if fichier is not None:
             f"Sur les {len(df_resultat) - nb_trouves} lignes sans correspondance : "
             f"{nb_sans_candidat} n'avaient aucun candidat présélectionné (texte/unité/nombres), "
             f"{nb_rejetes_gemini} avaient des candidats mais Gemini a jugé qu'aucun ne correspondait vraiment. "
-            "Elles restent affichées ci-dessous pour que rien ne disparaisse silencieusement — à compléter manuellement."
+            "Pour chacune, la colonne « Proposition (à valider) » montre le meilleur candidat écarté et son prix : "
+            "une piste à confirmer ou infirmer d'un coup d'œil, jamais comptée comme rapprochée automatiquement."
         )
 
     st.dataframe(
@@ -359,6 +387,8 @@ if fichier is not None:
             "nb_occurrences": "Occurrences (base)",
             "score_correspondance": st.column_config.NumberColumn("Score de similarité", format="%.2f"),
             "raison_echec": "Raison (si non trouvé)",
+            "proposition_a_valider": "Proposition (à valider)",
+            "prix_proposition": st.column_config.NumberColumn("Prix proposition (€)", format="%.2f"),
         },
     )
 
