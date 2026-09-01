@@ -29,6 +29,14 @@ docker compose build watcher streamlit
 echo "==> Redemarrage streamlit (watcher redemarre seul si le service tourne en continu)"
 docker compose up -d streamlit watcher
 
+# schema.sql est applique EXPLICITEMENT avant les migrations, sans compter sur
+# ensure_schema() du watcher : celui-ci tourne en asynchrone apres le up -d,
+# et migration_unites.sql depend de la NOUVELLE normaliser_unite() - si la
+# migration passait avant, l'UPDATE recalculerait les colonnes generees avec
+# l'ancienne fonction, sans erreur, silencieusement.
+echo "==> Application du schema (fonctions/vues a jour avant les migrations)"
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - < src/db/schema.sql
+
 echo "==> Migrations de donnees one-off"
 for migration in scripts/migration_*.sql; do
     echo "  -> $migration"
