@@ -26,6 +26,7 @@ import os
 import re
 from collections import defaultdict
 
+import httpx
 import psycopg
 from dotenv import load_dotenv
 from google import genai
@@ -44,8 +45,13 @@ TAILLE_LOT = 40         # paires par appel Gemini
 # Streamlit entiere cassee). Reessaie avec un delai croissant (4s, 8s, 16s,
 # 32s, 60s, 60s) avant d'abandonner - largement le temps qu'un pic de charge
 # passager se resorbe.
+# httpx.TransportError (connexion coupee, timeout...) est traite pareil : un
+# crash reel constate ("Server disconnected without sending a response", lot
+# 15/18 sur un run de 706 paires) ne remonte PAS comme ServerError - c'est une
+# coupure reseau/transport brute, avant meme que Gemini ait pu repondre. Meme
+# nature (transitoire) que le 503, meme traitement.
 _retry_surcharge = retry(
-    retry=retry_if_exception_type(ServerError),
+    retry=retry_if_exception_type((ServerError, httpx.TransportError)),
     wait=wait_exponential(multiplier=2, min=4, max=60),
     stop=stop_after_attempt(6),
     reraise=True,
@@ -120,6 +126,7 @@ def evaluer_confiance_groupe(client: genai.Client, sous_famille, unite, designat
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=ScoreConfiance,
+            temperature=0,
         ),
     )
     result = response.parsed if response.parsed is not None else ScoreConfiance.model_validate_json(response.text)
@@ -169,6 +176,15 @@ def normaliser(designation: str) -> str:
     d = re.sub(r"^ce prix r[ée]mun[èe]re\s*:?\s*", "", d)
     d = d.translate(_ACCENTS)
     d = d.translate(_HOMOGLYPHES)
+    # "<"/">" transformes en MOTS distincts avant le strip generique de
+    # ponctuation ci-dessous : sinon ils deviennent un simple espace, et
+    # "largeur < 2,50 m" / "largeur > 2,50 m" (deux produits opposes, prix
+    # differents) deviennent le texte EXACTEMENT identique -> fusionnes a tort
+    # des l'etape 1 (normalisation exacte, sans meme passer par Gemini). Bug
+    # reel trouve en base : "Fond de forme de largeur > 2,50 m" et son
+    # oppose "< 2,50 m" fusionnes sous la meme designation_canonique.
+    d = re.sub(r"<", " inferieur ", d)
+    d = re.sub(r">", " superieur ", d)
     d = re.sub(r"[^\w\s]", " ", d)  # ponctuation -> espace (garde les mots separes)
     d = re.sub(r"\s+", " ", d)
     return d.strip()
@@ -177,12 +193,40 @@ def normaliser(designation: str) -> str:
 _NUM_RE = re.compile(r"\d+")
 
 
+_INFERIEUR_RE = re.compile(r"<|\binf(?:[ée]rieur[e]?s?)?\b", re.IGNORECASE)
+_SUPERIEUR_RE = re.compile(r">|\bsup(?:[ée]rieur[e]?s?)?\b", re.IGNORECASE)
+
+
+def _sens_comparaison(texte: str) -> str | None:
+    """'inf' ou 'sup' si le texte exprime une seule borne (<, >, "superieur
+    a", "inferieur a"...), None sinon (pas de comparaison, ou les deux a la
+    fois - ex. une plage "20 < x < 50" - laisse alors Gemini trancher)."""
+    a_inf = bool(_INFERIEUR_RE.search(texte))
+    a_sup = bool(_SUPERIEUR_RE.search(texte))
+    if a_inf and not a_sup:
+        return "inf"
+    if a_sup and not a_inf:
+        return "sup"
+    return None
+
+
 def memes_nombres(a: str, b: str) -> bool:
     """Pre-filtre avant Gemini : un nombre different (classe, diametre,
     epaisseur...) est quasiment toujours un produit different dans ce type
     de catalogue BTP - inutile de deranger Gemini pour ces cas, verifie
-    empiriquement sur 1037 paires (1031 confirmees produits differents)."""
-    return set(_NUM_RE.findall(a)) == set(_NUM_RE.findall(b))
+    empiriquement sur 1037 paires (1031 confirmees produits differents).
+
+    Meme nombre mais sens de comparaison oppose (">2,50m" vs "<2,50m") =
+    aussi un produit different : pg_trgm ignore "<"/">" comme de la simple
+    ponctuation (verifie via show_trgm - trigrammes strictement identiques),
+    donc un score de similarite eleve ne suffit pas a les distinguer sans
+    cette verification explicite."""
+    if set(_NUM_RE.findall(a)) != set(_NUM_RE.findall(b)):
+        return False
+    sens_a, sens_b = _sens_comparaison(a), _sens_comparaison(b)
+    if sens_a is not None and sens_b is not None and sens_a != sens_b:
+        return False
+    return True
 
 
 class UnionFind:
@@ -221,6 +265,7 @@ def valider_par_lot(client: genai.Client, lot: list[tuple]) -> list[bool]:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=Decisions,
+            temperature=0,
         ),
     )
     result = response.parsed if response.parsed is not None else Decisions.model_validate_json(response.text)
@@ -246,7 +291,7 @@ def matcher_contre_groupes_valides(conn) -> int:
             SELECT DISTINCT ON (o.sous_famille, o.unite, o.designation)
                    o.sous_famille, o.unite, o.designation, g.designation_canonique
             FROM (
-                SELECT DISTINCT sous_famille, unite_canonique AS unite, designation
+                SELECT DISTINCT sous_famille_canonique AS sous_famille, unite_canonique AS unite, designation
                 FROM price_lines
                 WHERE designation_canonique IS NULL
             ) o
@@ -279,7 +324,7 @@ def matcher_contre_groupes_valides(conn) -> int:
                 UPDATE price_lines
                 SET designation_canonique = %s, en_attente = true
                 WHERE designation = %s
-                  AND sous_famille IS NOT DISTINCT FROM %s
+                  AND sous_famille_canonique IS NOT DISTINCT FROM %s
                   AND unite_canonique IS NOT DISTINCT FROM %s
                   AND fusion_manuelle = false
                 """,
@@ -304,16 +349,16 @@ def main():
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT sous_famille, unite_canonique AS unite, designation, count(*)
+            SELECT sous_famille_canonique AS sous_famille, unite_canonique AS unite, designation, count(*)
             FROM price_lines pl
             WHERE NOT EXISTS (
                 SELECT 1 FROM groupes g
                 WHERE g.valide = true
                   AND g.designation_canonique = pl.designation_canonique
-                  AND g.sous_famille IS NOT DISTINCT FROM pl.sous_famille
+                  AND g.sous_famille IS NOT DISTINCT FROM pl.sous_famille_canonique
                   AND g.unite IS NOT DISTINCT FROM pl.unite_canonique
             )
-            GROUP BY sous_famille, unite_canonique, designation
+            GROUP BY sous_famille_canonique, unite_canonique, designation
             """
         )
         occurrences = {(sf, u, d): n for sf, u, d, n in cur.fetchall()}
@@ -383,47 +428,69 @@ def main():
 
     if a_juger:
         client = _get_client()
-        nouvelles_decisions = []
+        n_lots = -(-len(a_juger) // TAILLE_LOT)
         for i in range(0, len(a_juger), TAILLE_LOT):
             lot = a_juger[i:i + TAILLE_LOT]
             decisions = valider_par_lot(client, lot)
+            decisions_lot = []
             for (sf, u, da, db), fusionner in zip(lot, decisions):
                 if fusionner:
                     uf.union((sf, u, da), (sf, u, db))
-                nouvelles_decisions.append((sf, u, da, db, fusionner))
-            print(f"  lot {i // TAILLE_LOT + 1}/{-(-len(a_juger) // TAILLE_LOT)} traite")
+                decisions_lot.append((sf, u, da, db, fusionner))
 
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO fusion_decisions (sous_famille, unite, designation_a, designation_b, fusionner)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (coalesce(sous_famille, ''), coalesce(unite, ''), designation_a, designation_b)
-                DO UPDATE SET fusionner = EXCLUDED.fusionner, decide_le = now()
-                """,
-                nouvelles_decisions,
-            )
-        conn.commit()
+            # Ecrit et commit CHAQUE lot immediatement (pas d'attente de la
+            # fin de la boucle) : un lot Gemini deja paye ne doit jamais etre
+            # reperdu si un lot SUIVANT plante (panne reseau, quota...) -
+            # incident reel constate ou un crash au lot 15/18 forçait a
+            # rejuger les 14 lots precedents au prochain run, faute d'avoir
+            # ete persistes en cours de route.
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO fusion_decisions (sous_famille, unite, designation_a, designation_b, fusionner)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (coalesce(sous_famille, ''), coalesce(unite, ''), designation_a, designation_b)
+                    DO UPDATE SET fusionner = EXCLUDED.fusionner, decide_le = now()
+                    """,
+                    decisions_lot,
+                )
+            conn.commit()
+            print(f"  lot {i // TAILLE_LOT + 1}/{n_lots} traite")
 
-    # 3. Clusters finaux + choix de la designation canonique
+    # 3. Clusters finaux + choix de la designation canonique.
+    # Un cluster rejoint "a_traiter" soit parce qu'il fusionne plusieurs
+    # orthographes distinctes (len > 1), soit parce que sa seule orthographe
+    # revient sur plusieurs lignes (occurrences > 1) : demande explicite -
+    # meme sans variante a fusionner, une designation repetee doit apparaitre
+    # dans "Revue des groupes" (auto-validee, rien a decider). On la
+    # distingue des vraies fusions via membres_signature SANS aucun "|"
+    # (une seule orthographe) - c'est ce que la page Streamlit utilise pour
+    # les griser/filtrer par defaut, pas de colonne supplementaire necessaire.
     clusters: dict[tuple, list] = defaultdict(list)
     for cle in cles:
         clusters[uf.find(cle)].append(cle)
-    a_fusionner = {root: membres for root, membres in clusters.items() if len(membres) > 1}
+    a_traiter = {
+        root: membres for root, membres in clusters.items()
+        if len(membres) > 1 or occurrences[membres[0]] > 1
+    }
 
-    print(f"\n{len(a_fusionner)} groupes de quasi-doublons fusionnes au total")
+    nb_fusions = sum(1 for m in a_traiter.values() if len(m) > 1)
+    nb_triviaux_total = len(a_traiter) - nb_fusions
+    print(f"\n{nb_fusions} groupes de quasi-doublons fusionnes, {nb_triviaux_total} designations repetees sans variante (ajoutees pour revue)")
 
     client = None
     nb_evalues = 0
     nb_caches = 0
     nb_auto_valides = 0
+    nb_triviaux = 0
 
     with conn.cursor() as cur:
-        for membres in a_fusionner.values():
+        for membres in a_traiter.values():
             canon = choisir_canonique(membres, occurrences)
             sf_groupe, unite_groupe, _ = membres[0]  # meme (sous_famille, unite) pour tous les membres d'un cluster
             designations_brutes = sorted({d for _, _, d in membres})
             signature = "|".join(designations_brutes)
+            trivial = len(membres) == 1  # une seule orthographe : rien a juger, juste plusieurs occurrences
 
             cur.execute(
                 """
@@ -443,6 +510,25 @@ def main():
                 # Verrouille par un humain, ou deja evalue pour cette exacte
                 # composition : on ne repaie jamais Gemini pour la meme chose.
                 nb_caches += 1
+            elif trivial:
+                # Aucune variante a departager : score parfait par definition,
+                # jamais besoin de deranger Gemini pour ca.
+                score = 1.0
+                auto_valide = True
+                nb_triviaux += 1
+                cur.execute(
+                    """
+                    INSERT INTO groupes (designation_canonique, sous_famille, unite, seuil_confiance, membres_signature, valide, valide_le)
+                    VALUES (%s, %s, %s, %s, %s, true, now())
+                    ON CONFLICT (designation_canonique, coalesce(sous_famille, ''), coalesce(unite, ''))
+                    DO UPDATE SET seuil_confiance = EXCLUDED.seuil_confiance,
+                                  membres_signature = EXCLUDED.membres_signature,
+                                  valide = EXCLUDED.valide,
+                                  valide_le = EXCLUDED.valide_le
+                    WHERE groupes.valide = false
+                    """,
+                    (canon, sf_groupe, unite_groupe, score, signature),
+                )
             else:
                 if client is None:
                     client = _get_client()
@@ -478,7 +564,7 @@ def main():
                 UPDATE price_lines
                 SET designation_canonique = %s
                 WHERE designation = %s
-                  AND sous_famille IS NOT DISTINCT FROM %s
+                  AND sous_famille_canonique IS NOT DISTINCT FROM %s
                   AND unite_canonique IS NOT DISTINCT FROM %s
                   AND fusion_manuelle = false
                 """,
@@ -493,7 +579,7 @@ def main():
                     UPDATE price_lines
                     SET fusion_manuelle = true, en_attente = false
                     WHERE designation = %s
-                      AND sous_famille IS NOT DISTINCT FROM %s
+                      AND sous_famille_canonique IS NOT DISTINCT FROM %s
                       AND unite_canonique IS NOT DISTINCT FROM %s
                     """,
                     [(d, sf, u) for sf, u, d in membres],
@@ -501,6 +587,7 @@ def main():
     conn.commit()
     print(f"{nb_evalues} groupes evalues par Gemini (nouveaux ou composition modifiee), {nb_caches} inchanges (score conserve)")
     print(f"{nb_auto_valides} groupes auto-valides (score >= {seuil_auto_validation:.2f})")
+    print(f"{nb_triviaux} designations repetees auto-validees sans appel Gemini (une seule orthographe)")
     conn.close()
 
 

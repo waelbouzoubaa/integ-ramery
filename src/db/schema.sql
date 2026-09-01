@@ -11,10 +11,23 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- Volontairement distincte de normaliser_unite : ici on garde la ponctuation
 -- (utile pour retrouver un texte tel quel), on ne fait que lisser accents/
 -- espaces/casse.
+-- Exception : "<" et ">" sont convertis en mots ("inferieur"/"superieur")
+-- AVANT tout le reste. pg_trgm (similarity(), utilise pour le rapprochement
+-- automatique de "Recherche de prix") traite ces symboles comme de simples
+-- separateurs de mots et les ignore completement (verifie via show_trgm) :
+-- "largeur < 2,50 m" et "largeur > 2,50 m" - deux produits opposes, prix
+-- differents - obtenaient un score de similarite de 1.0, parfaitement
+-- identiques pour Postgres. En mots, les trigrammes redeviennent distincts.
 CREATE OR REPLACE FUNCTION normaliser_recherche(t text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
     SELECT regexp_replace(
-        translate(lower(trim(t)), 'àâäéèêëîïôöùûüç', 'aaaeeeeiioouuuc'),
+        regexp_replace(
+            regexp_replace(
+                translate(lower(trim(t)), 'àâäéèêëîïôöùûüç', 'aaaeeeeiioouuuc'),
+                '<', ' inferieur ', 'g'
+            ),
+            '>', ' superieur ', 'g'
+        ),
         '\s+', ' ', 'g'
     )
 $$;
@@ -34,13 +47,76 @@ $$;
 --   en route barree", exprimee en % du prix de base). Le retirer laisse une
 --   chaine vide -> NULL, ce qui merge silencieusement ces lignes avec
 --   toutes celles qui n'ont VRAIMENT aucune unite - bug reel constate.
+-- "ml" (metre lineaire) fusionne avec "m" (metre) : en BTP, les deux
+-- designent la meme unite physique pour un article lineaire (bordure,
+-- canalisation...) - simple convention d'ecriture differente, jamais deux
+-- unites reellement differentes (contrairement a m2/m3 qui restent
+-- distincts, l'exposant est deja preserve). Incident reel constate sur
+-- "Recherche de prix" : la MEME ligne de bordereau ("type T2 <50ml")
+-- extraite en "M" par Gemini au lieu de "ML" (contrairement a la ligne A2
+-- juste au-dessus, extraite en "ML") bloquait un candidat par ailleurs
+-- parfaitement identique en base, uniquement a cause de cette variation
+-- d'ecriture entre deux lignes du MEME document.
 -- IMMUTABLE : requis pour l'utiliser dans une colonne generee (voir plus bas).
 CREATE OR REPLACE FUNCTION normaliser_unite(u text) RETURNS text
 LANGUAGE sql IMMUTABLE AS $$
     SELECT NULLIF(
+        CASE WHEN regexp_replace(
+                translate(lower(trim(u)), 'àâäéèêëîïôöùûüç²³', 'aaaeeeeiioouuuc23'),
+                '[^a-z0-9/%]', '', 'g'
+             ) = 'ml'
+             THEN 'm'
+             ELSE regexp_replace(
+                translate(lower(trim(u)), 'àâäéèêëîïôöùûüç²³', 'aaaeeeeiioouuuc23'),
+                '[^a-z0-9/%]', '', 'g'
+             )
+        END,
+        ''
+    )
+$$;
+
+-- Normalise une sous_famille pour qu'elle serve de cle de regroupement fiable,
+-- meme principe que normaliser_unite : accents/casse/ponctuation retires, un
+-- seul pluriel final strippe ("niveaux" -> "niveau", et pluriels irreguliers
+-- en "-x" du francais - "niveaux", "travaux" - d'ou le [sx]$, pas juste s$).
+-- Bug reel constate : "B16 Mises à niveau" / "B16 Mises à niveaux" / "B16
+-- Mises à niveaux." / "B41 Mises à niveau." ne fusionnaient JAMAIS entre
+-- elles (sous_famille brut fait partie de la cle de regroupement partout -
+-- vue, table groupes, fusion_decisions - mais n'a jamais reçu la moindre
+-- normalisation, contrairement a designation et unite).
+-- "<"/">"/"≤"/"≥" convertis en mots avant le strip generique de ponctuation,
+-- meme raison que normaliser_recherche : sinon "S > 1,20 m²" et "S < 1,20 m²"
+-- (deux sous-familles reellement opposees) deviendraient un texte identique
+-- une fois la ponctuation retiree.
+-- Volontairement CONSERVATEUR par ailleurs : ne touche jamais au prefixe de
+-- code eventuel (B16 vs B41 restent distincts) - la ou designation/unite ne
+-- traitent que du bruit de formatage objectif, un prefixe de code peut porter
+-- un sens metier reel (chapitre/lot different) qui n'est pas a cette
+-- fonction de trancher.
+-- IMMUTABLE : requis pour l'utiliser dans une colonne generee (voir plus bas).
+CREATE OR REPLACE FUNCTION normaliser_sous_famille(sf text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+    SELECT NULLIF(
         regexp_replace(
-            translate(lower(trim(u)), 'àâäéèêëîïôöùûüç²³', 'aaaeeeeiioouuuc23'),
-            '[^a-z0-9/%]', '', 'g'
+            trim(
+                regexp_replace(
+                    regexp_replace(
+                        regexp_replace(
+                            regexp_replace(
+                                regexp_replace(
+                                    translate(lower(trim(sf)), 'àâäéèêëîïôöùûüç', 'aaaeeeeiioouuuc'),
+                                    '<=|≤', ' inferieurouegal ', 'g'
+                                ),
+                                '>=|≥', ' superieurouegal ', 'g'
+                            ),
+                            '<', ' inferieur ', 'g'
+                        ),
+                        '>', ' superieur ', 'g'
+                    ),
+                    '[^a-z0-9]+', ' ', 'g'
+                )
+            ),
+            '[sx]$', ''
         ),
         ''
     )
@@ -50,6 +126,26 @@ CREATE TABLE IF NOT EXISTS price_documents (
     id          bigserial PRIMARY KEY,
     filename    text        NOT NULL UNIQUE,
     imported_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Trace durable de tout fichier qui echoue (telechargement SharePoint ou
+-- extraction Gemini) dans le watcher, pour ne plus jamais avoir a grep les
+-- logs docker pour savoir quels fichiers ont ete perdus (incident reel :
+-- "CANAPLES...pdf" perdu silencieusement sur une coupure reseau pendant le
+-- telechargement - le watcher avance son delta token SharePoint a chaque
+-- cycle QUE le fichier ait reussi ou non, donc un fichier en echec n'est
+-- JAMAIS retente automatiquement). Sert de liste "a retraiter manuellement"
+-- (voir tableau de bord). resolu=true une fois le fichier reintegre avec
+-- succes (ou le probleme juge non pertinent) - jamais supprime, pour garder
+-- l'historique.
+CREATE TABLE IF NOT EXISTS echecs_traitement (
+    id           bigserial PRIMARY KEY,
+    filename     text        NOT NULL,
+    chemin       text,
+    etape        text        NOT NULL,  -- 'telechargement' ou 'extraction'
+    erreur       text        NOT NULL,
+    survenu_le   timestamptz NOT NULL DEFAULT now(),
+    resolu       boolean     NOT NULL DEFAULT false
 );
 
 CREATE TABLE IF NOT EXISTS price_lines (
@@ -82,6 +178,15 @@ ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS unite_canonique text
 -- la main) : c'est elle qui sert de cle de regroupement partout (vue,
 -- fusion_designations.py, table groupes), jamais `unite` brute. `unite`
 -- brute reste affichee telle quelle pour la tracabilite.
+
+ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS sous_famille_canonique text
+    GENERATED ALWAYS AS (normaliser_sous_famille(sous_famille)) STORED;
+-- Meme principe que unite_canonique, pour sous_famille (voir
+-- normaliser_sous_famille ci-dessus). Sert de cle de regroupement partout a
+-- la place de `sous_famille` brute (vue, fusion_designations.py, table
+-- groupes) - meme convention deja en place pour `unite`/`unite_canonique`,
+-- ou la valeur canonique (normalisee) est ce qui s'affiche partout dans
+-- l'app, jamais la valeur brute.
 
 ALTER TABLE price_lines ADD COLUMN IF NOT EXISTS fusion_manuelle boolean NOT NULL DEFAULT false;
 -- Un humain a decide explicitement l'appartenance (groupe) de cette ligne
@@ -234,7 +339,12 @@ $$;
 -- Vue de travail : moyenne de prix par (sous_famille, unite, designation
 -- canonique). sous_famille ET unite font partie de la cle :
 -- - sous_famille : "avec grille fonte 100 mm" sous "classe 250" vs "classe
---   400" - prix reels differents.
+--   400" - prix reels differents. On groupe par sous_famille_canonique (voir
+--   normaliser_sous_famille) et non par sous_famille brute, meme logique que
+--   unite ci-dessous : "B16 Mises a niveau" / "B16 Mises a niveaux." sont la
+--   meme sous-famille ecrite differemment, jamais fusionnee avec une AUTRE
+--   sous-famille pour autant (le prefixe de code, ex. B16 vs B41, reste
+--   distinctif - voir normaliser_sous_famille).
 -- - unite : le meme texte facture au ml dans un document et au m2 dans un
 --   autre n'est pas le meme prix comparable (base de calcul differente) -
 --   ne jamais les moyenner ensemble. On groupe par unite_canonique (voir
@@ -263,7 +373,7 @@ DROP VIEW IF EXISTS prix_moyen_par_designation;
 CREATE VIEW prix_moyen_par_designation AS
 WITH agrege AS (
     SELECT
-        sous_famille,
+        sous_famille_canonique AS sous_famille,
         unite_canonique AS unite,
         coalesce(designation_canonique, designation) AS designation,
         count(*)                    AS nb_occurrences,
@@ -273,7 +383,7 @@ WITH agrege AS (
         max(prix_unitaire)          AS prix_max,
         array_agg(prix_unitaire)    AS prix_liste
     FROM price_lines
-    GROUP BY sous_famille, unite_canonique, coalesce(designation_canonique, designation)
+    GROUP BY sous_famille_canonique, unite_canonique, coalesce(designation_canonique, designation)
 )
 SELECT
     a.sous_famille,
