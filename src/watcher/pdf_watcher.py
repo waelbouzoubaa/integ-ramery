@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import requests
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "extraction"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "db"))
@@ -12,6 +13,43 @@ from sharepoint_client import get_headers, get_site_id, get_drive_id
 from config import POLL_INTERVAL, SHAREPOINT_FOLDER
 from gemini_extract import extract_pdf
 from load_json import get_conn, ensure_schema, load_items
+
+# Incident reel : "CANAPLES...pdf" perdu silencieusement sur une coupure
+# reseau pendant le telechargement (connexion coupee vers
+# login.microsoftonline.com). Reessaie avant d'abandonner - la plupart des
+# coupures de ce type sont un pic transitoire, pas une vraie panne.
+_retry_reseau = retry(
+    retry=retry_if_exception_type(requests.exceptions.RequestException),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
+
+
+def _resoudre_echecs(conn, filename: str) -> None:
+    """Referme tout echec anterieur non resolu pour ce fichier (voir
+    echecs_traitement) des qu'il finit par etre charge avec succes - sinon
+    un retraitement manuel reussi (ex: retraiter_echecs.py) laisse trainer
+    indefiniment une alerte perimee dans le tableau de bord."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE echecs_traitement SET resolu = true WHERE filename = %s AND NOT resolu",
+            (filename,),
+        )
+    conn.commit()
+
+
+def _enregistrer_echec(conn, filename: str, chemin: str, etape: str, erreur: str) -> None:
+    """Trace durable (table echecs_traitement) de tout fichier perdu - voir
+    schema.sql. Le watcher avance son delta token SharePoint que le fichier
+    ait reussi ou non : sans cette trace, un echec de telechargement/
+    extraction est perdu pour de bon, sans meme un moyen de savoir lequel."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO echecs_traitement (filename, chemin, etape, erreur) VALUES (%s, %s, %s, %s)",
+            (filename, chemin, etape, erreur),
+        )
+    conn.commit()
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -65,6 +103,7 @@ def fetch_delta(url):
     return items, delta_link
 
 
+@_retry_reseau
 def _download_file(item) -> bytes:
     """Telecharge via l'endpoint Graph authentifie (token frais a chaque
     appel). On evite volontairement l'URL pre-signee @microsoft.graph.downloadUrl
@@ -90,7 +129,7 @@ def _download_file(item) -> bytes:
     return resp.content
 
 
-def handle_pdf(name: str, file_bytes: bytes, item: dict, conn) -> None:
+def handle_pdf(name: str, file_bytes: bytes, item: dict, conn, chemin: str = "") -> None:
     """Recoit les octets telecharges directement depuis SharePoint (rien
     n'est ecrit sur disque avant extraction), lance l'extraction Gemini,
     dump en JSON (cache/audit) puis charge en Postgres. Ne doit jamais
@@ -105,20 +144,30 @@ def handle_pdf(name: str, file_bytes: bytes, item: dict, conn) -> None:
             data = json.loads(dest.read_text(encoding="utf-8"))
             n = load_items(conn, Path(name).stem, data["items"])
             print(f"  -> {n} lignes chargees en base")
+            _resoudre_echecs(conn, name)
         except Exception as exc:
             print(f"  -> Erreur chargement Postgres : {exc!r}")
+            _enregistrer_echec(conn, name, chemin, "chargement", repr(exc))
         return
 
     print(f"  -> Extraction en cours : {name} ({len(file_bytes)} octets)")
     try:
         result = extract_pdf(file_bytes, filename=name)
-        print(f"  -> {len(result.items)} lignes de prix extraites")
-        dest.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-        print(f"  -> Dump : {dest}")
-        n = load_items(conn, Path(name).stem, result.model_dump()["items"])
-        print(f"  -> {n} lignes chargees en base")
     except Exception as exc:
         print(f"  -> Erreur extraction : {exc!r}")
+        _enregistrer_echec(conn, name, chemin, "extraction", repr(exc))
+        return
+
+    print(f"  -> {len(result.items)} lignes de prix extraites")
+    dest.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    print(f"  -> Dump : {dest}")
+    try:
+        n = load_items(conn, Path(name).stem, result.model_dump()["items"])
+        print(f"  -> {n} lignes chargees en base")
+        _resoudre_echecs(conn, name)
+    except Exception as exc:
+        print(f"  -> Erreur chargement Postgres : {exc!r}")
+        _enregistrer_echec(conn, name, chemin, "chargement", repr(exc))
 
 
 def process_changes(items, file_cache, conn):
@@ -155,9 +204,10 @@ def process_changes(items, file_cache, conn):
             file_bytes = _download_file(item)
         except Exception as exc:
             print(f"  -> Erreur telechargement : {exc}")
+            _enregistrer_echec(conn, name, full_path, "telechargement", repr(exc))
             continue
 
-        handle_pdf(name, file_bytes, item, conn)
+        handle_pdf(name, file_bytes, item, conn, chemin=full_path)
 
 
 def run(once: bool = False):
