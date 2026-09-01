@@ -360,8 +360,28 @@ def matcher_contre_groupes_valides(conn) -> int:
     return nb_ajouts
 
 
+# Identifiant arbitraire mais fixe du verrou "une seule fusion a la fois"
+# (pg_advisory_lock travaille sur des entiers, pas des noms).
+_VERROU_FUSION = 745_231_901
+
+
 def main():
     conn = get_conn()
+
+    # Une seule fusion a la fois : Streamlit re-execute le script de la page a
+    # chaque interaction - un double clic ou un rechargement pendant un run
+    # lancait une DEUXIEME fusion en parallele (incident reel : la 2e est
+    # restee bloquee 26 min sur un verrou d'INSERT tenu par la 1re, avec
+    # risque de doublons/deadlock a la fin). Verrou advisory niveau session :
+    # libere automatiquement par Postgres si la connexion meurt (crash
+    # compris), donc pas de verrou fantome possible.
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_VERROU_FUSION,))
+        if not cur.fetchone()[0]:
+            raise RuntimeError(
+                "Une fusion est déjà en cours (autre onglet ou lancement précédent "
+                "pas encore terminé). Attendre qu'elle se termine avant de relancer."
+            )
 
     with conn.cursor() as cur:
         cur.execute("SELECT seuil_auto_validation FROM parametres WHERE id = 1")
