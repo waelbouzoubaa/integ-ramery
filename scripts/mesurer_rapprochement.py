@@ -72,7 +72,10 @@ class ChoixRapprochements(BaseModel):
 
 _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
+from fusion_designations import _retry_surcharge  # noqa: E402
 
+
+@_retry_surcharge
 def _arbitrer_par_lot(lot):
     lignes = []
     for id_, designation, candidats_txt in lot:

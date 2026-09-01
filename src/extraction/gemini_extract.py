@@ -1,13 +1,28 @@
 import os
 
+import httpx
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from google.genai.errors import ServerError
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from prompt import PROMPT_EXTRACTION, PROMPT_EXTRACTION_SANS_PRIX
 from schema import ExtractionResult, ExtractionSansPrix
 
 load_dotenv()
+
+# Meme protection que dans fusion_designations : Gemini renvoie regulierement
+# des 503 UNAVAILABLE ("high demand") transitoires - sans retry, un pic de
+# charge cote Google faisait planter l'extraction entiere (incident reel :
+# crash de la page Recherche de prix en pleine utilisation). Le SDK a bien un
+# retry interne mais il abandonne trop vite sur les 503 persistants.
+_retry_surcharge = retry(
+    retry=retry_if_exception_type((ServerError, httpx.TransportError)),
+    wait=wait_exponential(multiplier=2, min=4, max=60),
+    stop=stop_after_attempt(6),
+    reraise=True,
+)
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 # Plafond de sortie de gemini-2.5-pro (65536) : sans ce reglage explicite, le
@@ -46,6 +61,7 @@ def _get_client() -> genai.Client:
     return _client
 
 
+@_retry_surcharge
 def extract_pdf(file_bytes: bytes, filename: str = "") -> ExtractionResult:
     """Envoie le PDF natif a Gemini et recupere les lignes de prix structurees.
 
@@ -73,6 +89,7 @@ def extract_pdf(file_bytes: bytes, filename: str = "") -> ExtractionResult:
     return ExtractionResult.model_validate_json(response.text)
 
 
+@_retry_surcharge
 def extract_pdf_sans_prix(file_bytes: bytes, filename: str = "") -> ExtractionSansPrix:
     """Meme principe que extract_pdf, pour un bordereau VIERGE (designations
     et unites presentes, pas de prix) - voir 2_Recherche_de_prix.py."""

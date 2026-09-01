@@ -24,7 +24,7 @@ if str(DB_DIR) not in sys.path:
     sys.path.insert(0, str(DB_DIR))
 
 from gemini_extract import extract_pdf_sans_prix  # noqa: E402
-from fusion_designations import _sens_comparaison, memes_nombres  # noqa: E402
+from fusion_designations import _retry_surcharge, _sens_comparaison, memes_nombres  # noqa: E402
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 TAILLE_LOT = 20  # lignes de bordereau par appel Gemini (garde le prompt raisonnable)
@@ -69,9 +69,13 @@ def _get_client() -> genai.Client:
     return _client
 
 
+@_retry_surcharge
 def _arbitrer_par_lot(lot: list[tuple]) -> dict[int, int]:
     """lot = liste de (id, designation_bordereau, [designations_candidates]).
-    Renvoie {id: index_candidat_choisi (-1 si aucun)}."""
+    Renvoie {id: index_candidat_choisi (-1 si aucun)}.
+    _retry_surcharge (reessai sur 503/coupure reseau) : meme protection que la
+    fusion - crash reel constate sur un 503 "high demand" en pleine recherche,
+    la page entiere plantait au lieu d'attendre que le pic passe."""
     lignes = []
     for id_, designation, candidats_txt in lot:
         options = "  ".join(f"[{i}] {c!r}" for i, c in enumerate(candidats_txt))
