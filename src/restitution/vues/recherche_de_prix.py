@@ -24,7 +24,7 @@ if str(DB_DIR) not in sys.path:
     sys.path.insert(0, str(DB_DIR))
 
 from gemini_extract import extract_pdf_sans_prix  # noqa: E402
-from fusion_designations import _retry_surcharge, _sens_comparaison, memes_nombres  # noqa: E402
+from fusion_designations import _retry_surcharge, _sens_comparaison, memes_nombres, parse_reponse  # noqa: E402
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 TAILLE_LOT = 20  # lignes de bordereau par appel Gemini (garde le prompt raisonnable)
@@ -103,7 +103,7 @@ def _arbitrer_par_lot(lot: list[tuple]) -> dict[int, int]:
             temperature=0,
         ),
     )
-    result = response.parsed if response.parsed is not None else ChoixRapprochements.model_validate_json(response.text)
+    result = parse_reponse(response, ChoixRapprochements)
     return {c.id: c.index_candidat for c in result.choix}
 
 

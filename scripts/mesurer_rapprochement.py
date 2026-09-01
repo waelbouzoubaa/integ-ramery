@@ -85,7 +85,7 @@ class ChoixRapprochements(BaseModel):
 
 _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-from fusion_designations import _retry_surcharge  # noqa: E402
+from fusion_designations import _retry_surcharge, parse_reponse  # noqa: E402
 
 
 @_retry_surcharge
@@ -103,7 +103,7 @@ def _arbitrer_par_lot(lot):
             temperature=0,
         ),
     )
-    result = response.parsed if response.parsed is not None else ChoixRapprochements.model_validate_json(response.text)
+    result = parse_reponse(response, ChoixRapprochements)
     return {c.id: c.index_candidat for c in result.choix}
 
 

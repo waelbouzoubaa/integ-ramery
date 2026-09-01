@@ -17,12 +17,30 @@ load_dotenv()
 # charge cote Google faisait planter l'extraction entiere (incident reel :
 # crash de la page Recherche de prix en pleine utilisation). Le SDK a bien un
 # retry interne mais il abandonne trop vite sur les 503 persistants.
+# Reponse VIDE (ni .parsed ni .text) retentee au meme titre que le 503 :
+# constate en pratique sur la fusion (voir fusion_designations.py) - passer
+# response.text (None) a pydantic fait planter tout le traitement.
+class ReponseVideError(Exception):
+    pass
+
+
 _retry_surcharge = retry(
-    retry=retry_if_exception_type((ServerError, httpx.TransportError)),
+    retry=retry_if_exception_type((ServerError, httpx.TransportError, ReponseVideError)),
     wait=wait_exponential(multiplier=2, min=4, max=60),
     stop=stop_after_attempt(6),
     reraise=True,
 )
+
+
+def _parse_reponse(response, schema):
+    if response.parsed is not None:
+        return response.parsed
+    if response.text:
+        return schema.model_validate_json(response.text)
+    finish = "?"
+    if getattr(response, "candidates", None):
+        finish = getattr(response.candidates[0], "finish_reason", "?")
+    raise ReponseVideError(f"Reponse Gemini vide (finish_reason={finish})")
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 # Plafond de sortie de gemini-2.5-pro (65536) : sans ce reglage explicite, le
@@ -83,10 +101,7 @@ def extract_pdf(file_bytes: bytes, filename: str = "") -> ExtractionResult:
         ),
     )
 
-    if response.parsed is not None:
-        return response.parsed
-    # Filet de securite si le parsing automatique echoue
-    return ExtractionResult.model_validate_json(response.text)
+    return _parse_reponse(response, ExtractionResult)
 
 
 @_retry_surcharge
@@ -109,9 +124,7 @@ def extract_pdf_sans_prix(file_bytes: bytes, filename: str = "") -> ExtractionSa
         ),
     )
 
-    if response.parsed is not None:
-        return response.parsed
-    return ExtractionSansPrix.model_validate_json(response.text)
+    return _parse_reponse(response, ExtractionSansPrix)
 
 
 if __name__ == "__main__":

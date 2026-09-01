@@ -50,12 +50,36 @@ TAILLE_LOT = 40         # paires par appel Gemini
 # 15/18 sur un run de 706 paires) ne remonte PAS comme ServerError - c'est une
 # coupure reseau/transport brute, avant meme que Gemini ait pu repondre. Meme
 # nature (transitoire) que le 503, meme traitement.
+# Reponse Gemini VIDE (ni .parsed ni .text) : constate en pratique sur une
+# fusion complete a froid (VPS, 01/09) - un lot est revenu sans aucun contenu
+# (thinking ayant consomme tout le budget de sortie, ou reponse bloquee cote
+# Google), et le code tentait alors model_validate_json(None) -> crash
+# pydantic de toute la page. Meme nature transitoire que le 503 : on retente.
+class ReponseVideError(Exception):
+    pass
+
+
 _retry_surcharge = retry(
-    retry=retry_if_exception_type((ServerError, httpx.TransportError)),
+    retry=retry_if_exception_type((ServerError, httpx.TransportError, ReponseVideError)),
     wait=wait_exponential(multiplier=2, min=4, max=60),
     stop=stop_after_attempt(6),
     reraise=True,
 )
+
+
+def parse_reponse(response, schema):
+    """Extrait le resultat structure d'une reponse Gemini, ou leve
+    ReponseVideError (retryable) si la reponse est vide - ne jamais passer
+    response.text (potentiellement None) directement a pydantic."""
+    if response.parsed is not None:
+        return response.parsed
+    if response.text:
+        return schema.model_validate_json(response.text)
+    finish = "?"
+    if getattr(response, "candidates", None):
+        finish = getattr(response.candidates[0], "finish_reason", "?")
+    raise ReponseVideError(f"Reponse Gemini vide (finish_reason={finish})")
+
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
 
@@ -129,7 +153,7 @@ def evaluer_confiance_groupe(client: genai.Client, sous_famille, unite, designat
             temperature=0,
         ),
     )
-    result = response.parsed if response.parsed is not None else ScoreConfiance.model_validate_json(response.text)
+    result = parse_reponse(response, ScoreConfiance)
     return max(0.0, min(1.0, result.score))
 
 
@@ -268,7 +292,7 @@ def valider_par_lot(client: genai.Client, lot: list[tuple]) -> list[bool]:
             temperature=0,
         ),
     )
-    result = response.parsed if response.parsed is not None else Decisions.model_validate_json(response.text)
+    result = parse_reponse(response, Decisions)
     par_id = {d.id: d.fusionner for d in result.decisions}
     return [par_id.get(i, False) for i in range(len(lot))]
 
