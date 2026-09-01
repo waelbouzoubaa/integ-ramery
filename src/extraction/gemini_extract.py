@@ -10,6 +10,28 @@ from schema import ExtractionResult, ExtractionSansPrix
 load_dotenv()
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+# Plafond de sortie de gemini-2.5-pro (65536) : sans ce reglage explicite, le
+# SDK utilise une valeur par defaut plus basse et les gros DQE (une centaine
+# de lignes ou plus, 20+ pages) se retrouvent tronques en plein milieu du
+# JSON -> ExtractionResult invalide, document entier perdu (voir incident
+# "2A-CORBIE... DPGF BASE", 21 pages, EOF a la ligne 4580 de la reponse).
+MAX_OUTPUT_TOKENS = 65536
+# gemini-2.5-pro consacre par defaut une partie du budget de sortie au
+# "thinking" (raisonnement interne) AVANT de generer la reponse - ce budget
+# est preleve sur le meme MAX_OUTPUT_TOKENS. Sur "2A-CORBIE" (21 pages),
+# augmenter MAX_OUTPUT_TOKENS n'a pas suffi : la troncature est arrivee
+# encore PLUS TOT (ligne 4364 au lieu de 4580) car le modele a pense plus
+# longtemps sur ce document dense, laissant moins de place au JSON final.
+# Ce modele n'accepte pas de desactiver totalement le thinking (0), 128 est
+# le minimum autorise - une tache d'extraction/transcription n'a pas besoin
+# de raisonnement pousse, mieux vaut maximiser la place pour le JSON.
+THINKING_BUDGET = 128
+# Extraction structuree (transcription fidele), pas de generation creative :
+# temperature=0 minimise la variabilite d'un run a l'autre sur les decisions
+# limites (une designation etalee sur 2 lignes fusionnee ou pas, un total
+# ambigu inclus ou non...) - incident reel : le meme PDF extrait tantot 173,
+# tantot 174 lignes selon le run.
+TEMPERATURE = 0
 
 _client: genai.Client | None = None
 
@@ -39,6 +61,9 @@ def extract_pdf(file_bytes: bytes, filename: str = "") -> ExtractionResult:
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=ExtractionResult,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+            temperature=TEMPERATURE,
         ),
     )
 
@@ -61,6 +86,9 @@ def extract_pdf_sans_prix(file_bytes: bytes, filename: str = "") -> ExtractionSa
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=ExtractionSansPrix,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+            thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+            temperature=TEMPERATURE,
         ),
     )
 
