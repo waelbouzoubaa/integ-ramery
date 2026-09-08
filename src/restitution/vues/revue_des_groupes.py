@@ -211,26 +211,59 @@ st.divider()
 col_valider, col_retirer = st.columns(2)
 
 with col_valider:
-    st.subheader("Valider ce groupe")
-    st.write("Verrouille la composition actuelle : plus aucune fusion automatique ne la modifiera.")
-    if st.button("✅ Valider le groupe", type="primary"):
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE groupes SET valide = true, valide_le = now() WHERE id = %s",
-                (groupe_id,),
-            )
-            cur.execute(
-                """
-                UPDATE price_lines
-                SET fusion_manuelle = true, en_attente = false
-                WHERE coalesce(designation_canonique, designation) = %s
-                  AND sous_famille_canonique IS NOT DISTINCT FROM %s
-                  AND unite_canonique IS NOT DISTINCT FROM %s
-                """,
-                (canon, sf, u),
-            )
-        st.success("Groupe validé et verrouillé.")
-        st.rerun()
+    if valide:
+        # Inverse exact de la validation : deverrouille TOUTES les lignes du
+        # groupe (fusion_manuelle=false) sans toucher a leur
+        # designation_canonique - elles restent affichees dans ce groupe tant
+        # qu'un futur run de fusion (ou une action manuelle) ne les deplace
+        # pas. Si la composition n'a pas change au prochain run automatique,
+        # membres_signature identique => le run la laisse telle quelle
+        # (cf. "composition_inchangee" dans fusion_designations.py), le
+        # groupe reste donc "a valider" jusqu'a une vraie decision humaine.
+        st.subheader("Dévalider ce groupe")
+        st.write(
+            "Déverrouille la composition : les lignes redeviennent modifiables "
+            "par la prochaine fusion automatique."
+        )
+        if st.button("↩️ Dévalider le groupe"):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE groupes SET valide = false, valide_le = NULL WHERE id = %s",
+                    (groupe_id,),
+                )
+                cur.execute(
+                    """
+                    UPDATE price_lines
+                    SET fusion_manuelle = false
+                    WHERE coalesce(designation_canonique, designation) = %s
+                      AND sous_famille_canonique IS NOT DISTINCT FROM %s
+                      AND unite_canonique IS NOT DISTINCT FROM %s
+                    """,
+                    (canon, sf, u),
+                )
+            st.success("Groupe dévalidé et déverrouillé.")
+            st.rerun()
+    else:
+        st.subheader("Valider ce groupe")
+        st.write("Verrouille la composition actuelle : plus aucune fusion automatique ne la modifiera.")
+        if st.button("✅ Valider le groupe", type="primary"):
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE groupes SET valide = true, valide_le = now() WHERE id = %s",
+                    (groupe_id,),
+                )
+                cur.execute(
+                    """
+                    UPDATE price_lines
+                    SET fusion_manuelle = true, en_attente = false
+                    WHERE coalesce(designation_canonique, designation) = %s
+                      AND sous_famille_canonique IS NOT DISTINCT FROM %s
+                      AND unite_canonique IS NOT DISTINCT FROM %s
+                    """,
+                    (canon, sf, u),
+                )
+            st.success("Groupe validé et verrouillé.")
+            st.rerun()
 
 with col_retirer:
     st.subheader("Retirer une ligne")
@@ -313,4 +346,72 @@ with col_retirer:
                         (autre_canon, ligne_id),
                     )
             st.success("Ligne retirée du groupe.")
+            st.rerun()
+
+st.divider()
+
+st.subheader("Ajouter une désignation à ce groupe")
+st.caption(
+    "Recherche une désignation existante en base (même sous-famille/unité "
+    "obligatoire, pour que les prix restent comparables) et rattache-la à ce "
+    "groupe. Toutes les lignes portant exactement ce texte, dans n'importe "
+    "quel document, sont rattachées d'un coup, comme le ferait la fusion "
+    "automatique."
+)
+recherche_ajout = st.text_input("Rechercher une désignation à ajouter", key="recherche_ajout")
+
+if recherche_ajout:
+    candidats_ajout_df = pd.read_sql(
+        """
+        SELECT designation, count(*) AS occurrences
+        FROM price_lines
+        WHERE sous_famille_canonique IS NOT DISTINCT FROM %s
+          AND unite_canonique IS NOT DISTINCT FROM %s
+          AND coalesce(designation_canonique, designation) <> %s
+          AND designation ILIKE %s
+        GROUP BY designation
+        ORDER BY occurrences DESC
+        LIMIT 30
+        """,
+        conn,
+        params=(sf, u, canon, f"%{recherche_ajout}%"),
+    )
+    if candidats_ajout_df.empty:
+        st.info("Aucune désignation trouvée (même sous-famille/unité, hors de ce groupe).")
+    else:
+        candidats_ajout_df["libelle"] = (
+            candidats_ajout_df["designation"] + "  (" + candidats_ajout_df["occurrences"].astype(str) + " occurrence(s))"
+        )
+        choix_ajout = st.selectbox("Désignation à rattacher", options=candidats_ajout_df["libelle"].tolist())
+        designation_a_ajouter = candidats_ajout_df.loc[
+            candidats_ajout_df["libelle"] == choix_ajout, "designation"
+        ].iloc[0]
+
+        if st.button("➕ Rattacher à ce groupe"):
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE price_lines
+                    SET designation_canonique = %s, fusion_manuelle = true, en_attente = false
+                    WHERE designation = %s
+                      AND sous_famille_canonique IS NOT DISTINCT FROM %s
+                      AND unite_canonique IS NOT DISTINCT FROM %s
+                    """,
+                    (canon, designation_a_ajouter, sf, u),
+                )
+                # Enregistre la decision comme un "oui" permanent (meme cle
+                # que le "non" pose par le retrait cote fusion_decisions) :
+                # un futur run de fusion_designations.py ne remettra jamais
+                # en cause ce rattachement manuel.
+                a, b = sorted([designation_a_ajouter, canon])
+                cur.execute(
+                    """
+                    INSERT INTO fusion_decisions (sous_famille, unite, designation_a, designation_b, fusionner)
+                    VALUES (%s, %s, %s, %s, true)
+                    ON CONFLICT (coalesce(sous_famille, ''), coalesce(unite, ''), designation_a, designation_b)
+                    DO UPDATE SET fusionner = true, decide_le = now()
+                    """,
+                    (sf, u, a, b),
+                )
+            st.success(f"« {designation_a_ajouter} » rattachée au groupe.")
             st.rerun()
