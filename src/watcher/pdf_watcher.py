@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "extraction"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "db"))
 
 from sharepoint_client import get_headers, get_site_id, get_drive_id
-from config import POLL_INTERVAL, SHAREPOINT_FOLDER
+from config import POLL_INTERVAL
 from gemini_extract import extract_pdf
 from load_json import get_conn, ensure_schema, load_items
 
@@ -61,11 +61,25 @@ FILE_CACHE_FILE = STATE_DIR / "file_cache.json"
 
 
 def _folder_name_from_item(item) -> str:
-    """Nom du dossier SharePoint parent d'un item Graph (delta)."""
+    """Nom du dossier SharePoint parent (immediat) d'un item Graph (delta)."""
     parent_path = item.get("parentReference", {}).get("path", "")
     if "root:" in parent_path:
         return parent_path.split("root:")[-1].strip("/").split("/")[-1]
     return parent_path.strip("/").split("/")[-1]
+
+
+def _agence_from_item(item) -> str | None:
+    """Nom du dossier de PREMIER NIVEAU (racine du drive) contenant cet item -
+    une agence = un dossier a la racine, peu importe son nom, peu importe la
+    profondeur reelle du fichier en dessous (root:/Paris/sous-dossier/
+    fichier.pdf -> agence = "Paris", pas "sous-dossier"). Distinct de
+    _folder_name_from_item (dossier parent IMMEDIAT, utilise seulement pour
+    l'affichage du chemin complet dans les logs)."""
+    parent_path = item.get("parentReference", {}).get("path", "")
+    if "root:" not in parent_path:
+        return None
+    reste = parent_path.split("root:", 1)[-1].strip("/")
+    return reste.split("/")[0] if reste else None
 
 
 def load_state(drive_id):
@@ -129,12 +143,16 @@ def _download_file(item) -> bytes:
     return resp.content
 
 
-def handle_pdf(name: str, file_bytes: bytes, item: dict, conn, chemin: str = "") -> None:
+def handle_pdf(name: str, file_bytes: bytes, item: dict, conn, chemin: str = "", agence: str | None = None) -> None:
     """Recoit les octets telecharges directement depuis SharePoint (rien
     n'est ecrit sur disque avant extraction), lance l'extraction Gemini,
     dump en JSON (cache/audit) puis charge en Postgres. Ne doit jamais
     lever d'exception : un fichier en echec ne doit pas interrompre le
-    traitement des suivants."""
+    traitement des suivants.
+
+    Un fichier deplace vers un autre dossier agence (contenu identique,
+    JSON deja en cache) passe par la branche "deja extrait" - aucune
+    extraction Gemini n'est repayee, seule l'agence en base est mise a jour."""
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     dest = OUT_DIR / f"{Path(name).stem}.json"
 
@@ -142,7 +160,7 @@ def handle_pdf(name: str, file_bytes: bytes, item: dict, conn, chemin: str = "")
         print(f"  -> Deja extrait ({dest.name}), chargement Postgres...")
         try:
             data = json.loads(dest.read_text(encoding="utf-8"))
-            n = load_items(conn, Path(name).stem, data["items"])
+            n = load_items(conn, Path(name).stem, data["items"], agence=agence)
             print(f"  -> {n} lignes chargees en base")
             _resoudre_echecs(conn, name)
         except Exception as exc:
@@ -162,7 +180,7 @@ def handle_pdf(name: str, file_bytes: bytes, item: dict, conn, chemin: str = "")
     dest.write_text(result.model_dump_json(indent=2), encoding="utf-8")
     print(f"  -> Dump : {dest}")
     try:
-        n = load_items(conn, Path(name).stem, result.model_dump()["items"])
+        n = load_items(conn, Path(name).stem, result.model_dump()["items"], agence=agence)
         print(f"  -> {n} lignes chargees en base")
         _resoudre_echecs(conn, name)
     except Exception as exc:
@@ -193,12 +211,17 @@ def process_changes(items, file_cache, conn):
         if not name.lower().endswith(".pdf"):
             continue
 
-        if SHAREPOINT_FOLDER and folder.lower() != SHAREPOINT_FOLDER.lower():
-            continue
+        # Chaque dossier de premier niveau a la racine du drive est une
+        # agence (Paris, Amiens, Séléction, ou toute autre creee plus tard) -
+        # plus de filtre sur un seul dossier fixe (voir ancien SHAREPOINT_
+        # FOLDER, retire). Un fichier deplace d'une agence a l'autre remonte
+        # normalement dans le delta (changement de parentReference) et sera
+        # rechargee avec sa nouvelle agence, sans re-extraction (cache JSON).
+        agence = _agence_from_item(item)
 
         is_new = item.get("lastModifiedDateTime") == item.get("createdDateTime")
         tag = "AJOUTE" if is_new else "MODIFIE"
-        print(f"[{tag}]    {full_path}")
+        print(f"[{tag}]    {full_path}  (agence: {agence or '?'})")
 
         try:
             file_bytes = _download_file(item)
@@ -207,7 +230,7 @@ def process_changes(items, file_cache, conn):
             _enregistrer_echec(conn, name, full_path, "telechargement", repr(exc))
             continue
 
-        handle_pdf(name, file_bytes, item, conn, chemin=full_path)
+        handle_pdf(name, file_bytes, item, conn, chemin=full_path, agence=agence)
 
 
 def run(once: bool = False):

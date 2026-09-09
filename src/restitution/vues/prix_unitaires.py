@@ -60,6 +60,20 @@ with st.expander("⚙️ Paramètres de détection des anomalies de prix"):
         st.success("Seuil mis à jour.")
         st.rerun()
 
+# Une agence = un dossier SharePoint de premier niveau (Paris, Amiens,
+# Séléction...), voir _agence_from_item dans pdf_watcher.py. "Toutes les
+# agences" reproduit exactement le comportement d'avant (agence NULL dans
+# prix_moyen_par_designation_fn) - les moyennes sur une agence precise sont
+# RECALCULEES sur son seul sous-ensemble de lignes, pas juste filtrees apres
+# coup (nb_occurrences, prix_moyen, correction IQR... tout redevient propre
+# a cette agence).
+agences_df = pd.read_sql(
+    "SELECT DISTINCT agence FROM price_documents WHERE agence IS NOT NULL ORDER BY agence", conn
+)
+TOUTES_AGENCES = "Toutes les agences"
+agence_choisie = st.selectbox("Agence", options=[TOUTES_AGENCES] + agences_df["agence"].tolist())
+agence_filtre = None if agence_choisie == TOUTES_AGENCES else agence_choisie
+
 recherche = st.text_input(
     "Rechercher une désignation (recherche partielle) ou un prix",
     placeholder="Ex : bordure, déviation, 45.20...",
@@ -70,9 +84,9 @@ query = """
            prix_moyen, ecart_type, prix_min, prix_max, coefficient_variation,
            anomalie_detectee, prix_moyen_corrige, ecart_type_corrige,
            nb_valeurs_aberrantes, q1, q3, borne_basse, borne_haute, valeurs_retenues
-    FROM prix_moyen_par_designation
+    FROM prix_moyen_par_designation_fn(%s)
 """
-params: tuple = ()
+params: list = [agence_filtre]
 if recherche:
     # Si le texte tape est un nombre, on cherche un PRIX (utile pour
     # retrouver a quelle designation appartient une valeur vue dans un PDF).
@@ -87,13 +101,13 @@ if recherche:
         pass
     if prix_recherche is not None:
         query += " WHERE %s BETWEEN prix_min AND prix_max"
-        params = (prix_recherche,)
+        params.append(prix_recherche)
     else:
         query += " WHERE normaliser_recherche(designation) ILIKE '%%' || normaliser_recherche(%s) || '%%'"
-        params = (recherche,)
+        params.append(recherche)
 query += " ORDER BY nb_occurrences DESC"
 
-df = pd.read_sql(query, conn, params=params)
+df = pd.read_sql(query, conn, params=tuple(params))
 df["designation_affichee"] = df["designation"] + df["anomalie_detectee"].apply(lambda a: " *" if a else "")
 
 st.dataframe(
@@ -137,15 +151,20 @@ if not df.empty:
     detail_query = """
         SELECT pl.designation AS designation_brute, pl.chapitre, pl.sous_famille,
                pl.unite, pl.quantite, pl.prix_unitaire, pl.montant_ht,
-               pd.filename AS document
+               pd.filename AS document, pd.agence
         FROM price_lines pl
         JOIN price_documents pd ON pd.id = pl.document_id
         WHERE coalesce(pl.designation_canonique, pl.designation) = %s
           AND pl.sous_famille_canonique IS NOT DISTINCT FROM %s
           AND pl.unite_canonique IS NOT DISTINCT FROM %s
+          AND (%s::text IS NULL OR pd.agence = %s)
         ORDER BY pl.prix_unitaire
     """
-    detail_df = pd.read_sql(detail_query, conn, params=(designation_choisie, sous_famille_choisie, unite_choisie))
+    detail_df = pd.read_sql(
+        detail_query,
+        conn,
+        params=(designation_choisie, sous_famille_choisie, unite_choisie, agence_filtre, agence_filtre),
+    )
 
     if anomalie:
         borne_basse = float(ligne["borne_basse"])
@@ -185,6 +204,7 @@ if not df.empty:
         hide_index=True,
         column_config={
             "document": "Document",
+            "agence": "Agence",
             "designation_brute": "Désignation (telle qu'écrite dans le PDF)",
             "chapitre": "Chapitre",
             "sous_famille": "Sous-famille",

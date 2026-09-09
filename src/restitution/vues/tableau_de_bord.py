@@ -194,18 +194,20 @@ st.divider()
 # affichage coherent.
 journal_df = pd.read_sql(
     """
-    SELECT filename, statut, nb_lignes, date_evenement FROM (
+    SELECT filename, agence, statut, nb_lignes, date_evenement FROM (
         SELECT pd.filename                                AS filename,
+               pd.agence                                   AS agence,
                'Traité'                                    AS statut,
                count(pl.id)                                AS nb_lignes,
                pd.imported_at                               AS date_evenement
         FROM price_documents pd
         LEFT JOIN price_lines pl ON pl.document_id = pd.id
-        GROUP BY pd.id, pd.filename, pd.imported_at
+        GROUP BY pd.id, pd.filename, pd.agence, pd.imported_at
 
         UNION ALL
 
         SELECT regexp_replace(filename, '\\.pdf$', '', 'i')  AS filename,
+               NULL                                          AS agence,
                'Échec'                                       AS statut,
                NULL                                          AS nb_lignes,
                survenu_le                                    AS date_evenement
@@ -225,6 +227,7 @@ st.dataframe(
     hide_index=True,
     column_config={
         "filename": "Fichier",
+        "agence": "Agence",
         "statut": "Statut",
         "nb_lignes": "Lignes extraites",
         "date_evenement": st.column_config.DatetimeColumn("Date", format="DD/MM/YYYY HH:mm"),

@@ -23,19 +23,27 @@ def ensure_schema(conn):
     conn.commit()
 
 
-def load_items(conn, filename: str, items: list[dict]) -> int:
+def load_items(conn, filename: str, items: list[dict], agence: str | None = None) -> int:
     """Insere un document (par nom de fichier, sans extension) + ses lignes.
     Idempotent : repart de zero pour ce document a chaque appel, donc
-    rejouable sans creer de doublons."""
+    rejouable sans creer de doublons.
+
+    agence=None (valeur par defaut, utilisee par le rechargement local en
+    masse depuis out/*.json qui n'a aucune info SharePoint) ne doit JAMAIS
+    ecraser une agence deja connue - d'ou le COALESCE cote UPDATE : seul un
+    appel du watcher qui CONNAIT reellement l'agence (nouveau fichier, ou
+    fichier deplace vers un autre dossier) peut la modifier."""
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO price_documents (filename)
-            VALUES (%s)
-            ON CONFLICT (filename) DO UPDATE SET filename = EXCLUDED.filename
+            INSERT INTO price_documents (filename, agence)
+            VALUES (%s, %s)
+            ON CONFLICT (filename) DO UPDATE SET
+                filename = EXCLUDED.filename,
+                agence = COALESCE(EXCLUDED.agence, price_documents.agence)
             RETURNING id
             """,
-            (filename,),
+            (filename, agence),
         )
         document_id = cur.fetchone()[0]
 

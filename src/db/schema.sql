@@ -189,9 +189,14 @@ LANGUAGE sql IMMUTABLE AS $$
     )
 $$;
 
+-- agence = nom du dossier SharePoint de PREMIER NIVEAU (racine du drive)
+-- contenant le PDF source - une agence = un dossier a la racine, peu importe
+-- son nom (voir _agence_from_item dans pdf_watcher.py). NULL tant que le
+-- watcher n'a pas (re)traite ce document depuis l'ajout de cette colonne.
 CREATE TABLE IF NOT EXISTS price_documents (
     id          bigserial PRIMARY KEY,
     filename    text        NOT NULL UNIQUE,
+    agence      text,
     imported_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -434,43 +439,78 @@ $$;
 -- via q1/q3/borne_basse/borne_haute et via price_lines elle-meme (aucune
 -- donnee brute n'est jamais supprimee ou modifiee).
 --
+-- Meme calcul que la vue ci-dessous, mais parametrable par agence (p_agence
+-- NULL = toutes agences confondues, comportement identique a avant). Extrait
+-- en fonction pour ne dupliquer cette logique (agregation + correction IQR)
+-- nulle part : la vue prix_moyen_par_designation n'est plus qu'un appel a
+-- cette fonction avec p_agence = NULL, donc tout le code existant qui lit
+-- "FROM prix_moyen_par_designation" continue de fonctionner a l'identique.
+-- Filtrer par agence necessite un JOIN sur price_documents (agence y est
+-- stockee, pas sur price_lines - un document appartient a une seule agence).
+CREATE OR REPLACE FUNCTION prix_moyen_par_designation_fn(p_agence text DEFAULT NULL)
+RETURNS TABLE (
+    sous_famille           text,
+    unite                  text,
+    designation            text,
+    nb_occurrences         bigint,
+    prix_moyen             numeric,
+    ecart_type             numeric,
+    prix_min               numeric,
+    prix_max               numeric,
+    coefficient_variation  numeric,
+    q1                     numeric,
+    q3                     numeric,
+    borne_basse            numeric,
+    borne_haute            numeric,
+    nb_valeurs_aberrantes  int,
+    anomalie_detectee      boolean,
+    prix_moyen_corrige     numeric,
+    ecart_type_corrige     numeric,
+    valeurs_retenues       numeric[]
+)
+LANGUAGE sql STABLE AS $$
+    WITH agrege AS (
+        SELECT
+            pl.sous_famille_canonique AS sous_famille,
+            pl.unite_canonique AS unite,
+            coalesce(pl.designation_canonique, pl.designation) AS designation,
+            count(*)                       AS nb_occurrences,
+            avg(pl.prix_unitaire)          AS prix_moyen,
+            stddev_samp(pl.prix_unitaire)  AS ecart_type,
+            min(pl.prix_unitaire)          AS prix_min,
+            max(pl.prix_unitaire)          AS prix_max,
+            array_agg(pl.prix_unitaire)    AS prix_liste
+        FROM price_lines pl
+        JOIN price_documents pd ON pd.id = pl.document_id
+        WHERE p_agence IS NULL OR pd.agence = p_agence
+        GROUP BY pl.sous_famille_canonique, pl.unite_canonique, coalesce(pl.designation_canonique, pl.designation)
+    )
+    SELECT
+        a.sous_famille,
+        a.unite,
+        a.designation,
+        a.nb_occurrences,
+        a.prix_moyen,
+        a.ecart_type,
+        a.prix_min,
+        a.prix_max,
+        coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) AS coefficient_variation,
+        c.q1,
+        c.q3,
+        c.borne_basse,
+        c.borne_haute,
+        c.nb_exclues                                              AS nb_valeurs_aberrantes,
+        (c.nb_exclues > 0)                                        AS anomalie_detectee,
+        CASE WHEN c.nb_exclues > 0 THEN c.moyenne_corrigee   ELSE a.prix_moyen END AS prix_moyen_corrige,
+        CASE WHEN c.nb_exclues > 0 THEN c.ecart_type_corrige ELSE a.ecart_type END AS ecart_type_corrige,
+        c.valeurs_retenues
+    FROM agrege a
+    CROSS JOIN parametres p
+    CROSS JOIN LATERAL corriger_valeurs_aberrantes(a.prix_liste, p.seuil_cv_anomalie) c;
+$$;
+
 -- DROP necessaire : CREATE OR REPLACE ne permet pas de changer l'ordre des
 -- colonnes d'une vue existante (ici on insere sous_famille en 1ere position).
 DROP VIEW IF EXISTS prix_moyen_par_designation;
 CREATE VIEW prix_moyen_par_designation AS
-WITH agrege AS (
-    SELECT
-        sous_famille_canonique AS sous_famille,
-        unite_canonique AS unite,
-        coalesce(designation_canonique, designation) AS designation,
-        count(*)                    AS nb_occurrences,
-        avg(prix_unitaire)          AS prix_moyen,
-        stddev_samp(prix_unitaire)  AS ecart_type,
-        min(prix_unitaire)          AS prix_min,
-        max(prix_unitaire)          AS prix_max,
-        array_agg(prix_unitaire)    AS prix_liste
-    FROM price_lines
-    GROUP BY sous_famille_canonique, unite_canonique, coalesce(designation_canonique, designation)
-)
-SELECT
-    a.sous_famille,
-    a.unite,
-    a.designation,
-    a.nb_occurrences,
-    a.prix_moyen,
-    a.ecart_type,
-    a.prix_min,
-    a.prix_max,
-    coalesce(a.ecart_type / nullif(a.prix_moyen, 0) * 100, 0) AS coefficient_variation,
-    c.q1,
-    c.q3,
-    c.borne_basse,
-    c.borne_haute,
-    c.nb_exclues                                              AS nb_valeurs_aberrantes,
-    (c.nb_exclues > 0)                                        AS anomalie_detectee,
-    CASE WHEN c.nb_exclues > 0 THEN c.moyenne_corrigee   ELSE a.prix_moyen END AS prix_moyen_corrige,
-    CASE WHEN c.nb_exclues > 0 THEN c.ecart_type_corrige ELSE a.ecart_type END AS ecart_type_corrige,
-    c.valeurs_retenues
-FROM agrege a
-CROSS JOIN parametres p
-CROSS JOIN LATERAL corriger_valeurs_aberrantes(a.prix_liste, p.seuil_cv_anomalie) c;
+SELECT * FROM prix_moyen_par_designation_fn(NULL);
