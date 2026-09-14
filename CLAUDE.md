@@ -114,6 +114,23 @@ recalcul complet : `UPDATE table SET colonne_source = colonne_source`
 (toucher la vraie colonne source, pas une autre) - ou repartir d'un
 TRUNCATE + reload complet si plus sûr.
 
+## Tests unitaires (`tests/`)
+
+Couvrent uniquement les fonctions déterministes pures (parsing, normalisation,
+extraction de nombres/sens/agence) - jamais la base, jamais Gemini. Le
+Dockerfile installe volontairement `--no-dev` (image de prod sans pytest) :
+lancer les tests resynchronise avec les dépendances de dev dans un conteneur
+éphémère, sans jamais toucher à l'image déployée :
+
+```bash
+docker compose run --rm -v ./tests:/app/tests watcher sh -c "cd /app && uv sync --locked && uv run --no-sync pytest tests/ -v"
+```
+
+Ajouter `pytest` (ou toute dépendance) via `uv add --dev <paquet>` **sur
+l'hôte** (pas depuis un `docker compose run`, qui écrit dans le système de
+fichiers éphémère du conteneur et perd tout au `--rm` - piège déjà rencontré)
+puis rebuild l'image pour que `uv.lock` mis à jour y soit copié.
+
 ## Outils de mesure et d'audit (`scripts/`)
 
 - `mesurer_rapprochement.py` : mesure CLI du taux de rapprochement (page
