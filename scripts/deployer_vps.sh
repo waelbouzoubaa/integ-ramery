@@ -29,29 +29,22 @@ docker compose build watcher streamlit
 echo "==> Redemarrage streamlit (watcher redemarre seul si le service tourne en continu)"
 docker compose up -d streamlit watcher
 
-# schema.sql applique en "sandwich" autour des migrations - deux besoins
-# opposes selon la migration :
-# - migration_unites.sql a besoin du schema A JOUR (nouvelle
-#   normaliser_unite()) AVANT de tourner, sinon l'UPDATE recalculerait les
-#   colonnes generees avec l'ancienne fonction, sans erreur, silencieusement.
-# - migration_agence.sql (ALTER TABLE ADD COLUMN agence) doit au contraire
-#   passer AVANT le schema, puisque prix_moyen_par_designation_fn() reference
-#   cette colonne des sa definition - schema.sql echouerait sinon
-#   ("column pd.agence does not exist").
-# Rejouer schema.sql une 2e fois apres les migrations resout les deux cas a
-# la fois : il est entierement idempotent (CREATE OR REPLACE FUNCTION,
-# CREATE TABLE IF NOT EXISTS, DROP VIEW + CREATE VIEW), le rejouer ne casse
-# jamais rien.
-echo "==> Application du schema (1er passage, avant les migrations)"
-docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - < src/db/schema.sql || true
+# schema.sql AVANT les migrations, toujours. Convention du projet (voir
+# CLAUDE.md) : toute nouvelle colonne vit en ALTER TABLE ... IF NOT EXISTS
+# DANS schema.sql (jamais dans un script de migration a part) - donc
+# schema.sql est TOUJOURS suffisant pour amener la structure a jour avant
+# qu'une migration de DONNEES (scripts/migration_*.sql) ne tourne dessus.
+# C'est l'inverse qui casserait : migration_unites.sql a besoin de la
+# NOUVELLE normaliser_unite() avant de recalculer les colonnes generees,
+# sinon l'UPDATE les recalculerait avec l'ancienne fonction, sans erreur,
+# silencieusement.
+echo "==> Application du schema (fonctions/vues/colonnes a jour)"
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - < src/db/schema.sql
 
 echo "==> Migrations de donnees one-off"
 for migration in scripts/migration_*.sql; do
     echo "  -> $migration"
     docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - < "$migration"
 done
-
-echo "==> Application du schema (2e passage, apres les migrations)"
-docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -f - < src/db/schema.sql
 
 echo "==> Deploiement termine."

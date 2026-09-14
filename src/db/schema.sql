@@ -189,16 +189,23 @@ LANGUAGE sql IMMUTABLE AS $$
     )
 $$;
 
+CREATE TABLE IF NOT EXISTS price_documents (
+    id          bigserial PRIMARY KEY,
+    filename    text        NOT NULL UNIQUE,
+    imported_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- CREATE TABLE IF NOT EXISTS n'ajoute pas de colonne a une table existante :
+-- toute nouvelle colonne doit passer par un ALTER explicite ici (meme
+-- convention que price_lines plus bas) - jamais par un script
+-- scripts/migration_*.sql a part, reserve aux transformations de DONNEES
+-- (recalcul, dedoublonnage) qui ne peuvent pas etre du simple SQL idempotent
+-- rejouable a chaque demarrage.
 -- agence = nom du dossier SharePoint de PREMIER NIVEAU (racine du drive)
 -- contenant le PDF source - une agence = un dossier a la racine, peu importe
 -- son nom (voir _agence_from_item dans pdf_watcher.py). NULL tant que le
 -- watcher n'a pas (re)traite ce document depuis l'ajout de cette colonne.
-CREATE TABLE IF NOT EXISTS price_documents (
-    id          bigserial PRIMARY KEY,
-    filename    text        NOT NULL UNIQUE,
-    agence      text,
-    imported_at timestamptz NOT NULL DEFAULT now()
-);
+ALTER TABLE price_documents ADD COLUMN IF NOT EXISTS agence text;
 
 -- Trace durable de tout fichier qui echoue (telechargement SharePoint ou
 -- extraction Gemini) dans le watcher, pour ne plus jamais avoir a grep les
