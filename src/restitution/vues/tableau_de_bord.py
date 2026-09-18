@@ -114,6 +114,76 @@ c8.metric(
 
 st.divider()
 
+# Une agence = un dossier SharePoint de premier niveau (voir _agence_from_item
+# dans pdf_watcher.py). agence reste NULL tant que le watcher n'a pas
+# (re)traite ce document depuis l'ajout de cette colonne - le distinguer
+# explicitement plutot que de le compter silencieusement dans une agence,
+# pour reperer tout de suite un rescan complet a faire (voir CLAUDE.md).
+st.subheader("Répartition par agence")
+agences_stats = pd.read_sql(
+    """
+    SELECT
+        (SELECT count(DISTINCT agence) FROM price_documents WHERE agence IS NOT NULL) AS nb_agences,
+        (SELECT count(*) FROM price_documents WHERE agence IS NULL)                    AS docs_sans_agence
+    """,
+    conn,
+).iloc[0]
+
+c_ag1, c_ag2 = st.columns(2)
+c_ag1.metric("Agences actives", int(agences_stats["nb_agences"]))
+c_ag2.metric(
+    "Documents sans agence connue",
+    int(agences_stats["docs_sans_agence"]),
+    help="Documents jamais retraités par le watcher depuis l'ajout du multi-agences. "
+    "Un rescan complet (vider data/state/delta_token.json puis redémarrer le watcher) "
+    "les rattache sans ré-extraction, depuis le JSON déjà en cache.",
+)
+
+if int(agences_stats["nb_agences"]) > 0:
+    # Volume (documents/lignes) directement sur price_lines/price_documents ;
+    # nombre de designations DISTINCTES via prix_moyen_par_designation_fn -
+    # reutilise le meme calcul que la page Prix unitaires (une ligne "*10cm"
+    # et "10cm" comptent pour 1 seule designation apres fusion, pas 2).
+    volume_par_agence = pd.read_sql(
+        """
+        SELECT pd.agence, count(DISTINCT pd.id) AS nb_documents, count(pl.id) AS nb_lignes
+        FROM price_documents pd
+        LEFT JOIN price_lines pl ON pl.document_id = pd.id
+        WHERE pd.agence IS NOT NULL
+        GROUP BY pd.agence
+        """,
+        conn,
+    )
+    designations_par_agence = pd.read_sql(
+        """
+        SELECT ag.agence, count(*) AS nb_designations
+        FROM (SELECT DISTINCT agence FROM price_documents WHERE agence IS NOT NULL) ag
+        CROSS JOIN LATERAL prix_moyen_par_designation_fn(ag.agence) f
+        GROUP BY ag.agence
+        """,
+        conn,
+    )
+    par_agence_df = volume_par_agence.merge(designations_par_agence, on="agence").sort_values(
+        "nb_designations", ascending=False
+    )
+
+    st.dataframe(
+        par_agence_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "agence": "Agence",
+            "nb_documents": "Documents",
+            "nb_lignes": "Lignes brutes",
+            "nb_designations": "Désignations distinctes",
+        },
+    )
+    st.bar_chart(par_agence_df.set_index("agence")["nb_designations"])
+else:
+    st.info("Aucune agence connue pour l'instant — voir « Documents sans agence connue » ci-dessus.")
+
+st.divider()
+
 col_gauche, col_droite = st.columns(2)
 
 with col_gauche:
