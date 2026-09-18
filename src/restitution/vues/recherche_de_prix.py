@@ -178,15 +178,32 @@ st.caption(
     "le prix moyen corrigé correspondant."
 )
 
+# Une agence = un dossier SharePoint de premier niveau (Paris, Amiens...),
+# meme principe et memes noms que le selecteur de Prix unitaires - duplique
+# volontairement ici (chaque vue Streamlit est un script independant, meme
+# convention deja en place pour d'autres blocs partages dans ce projet).
+# "Toutes les agences" = comportement inchange (comparaison a toute la base).
+agences_df = pd.read_sql(
+    "SELECT DISTINCT agence FROM price_documents WHERE agence IS NOT NULL ORDER BY agence", conn
+)
+TOUTES_AGENCES = "Toutes les agences"
+agence_choisie = st.selectbox(
+    "Comparer aux prix de", options=[TOUTES_AGENCES] + agences_df["agence"].tolist()
+)
+agence_filtre = None if agence_choisie == TOUTES_AGENCES else agence_choisie
+
 fichier = st.file_uploader("Bordereau vierge (PDF)", type=["pdf"])
 
 if fichier is not None:
     # Chaque interaction Streamlit (meme cliquer sur "Telecharger en CSV")
     # relance TOUT le script depuis le haut - sans ce garde-fou, cliquer sur
     # le bouton de telechargement relancait l'extraction ET tout le
-    # rapprochement Gemini a chaque fois (bug remonte). On ne retraite le
-    # fichier que s'il a change (nom+taille), sinon on reutilise le resultat
-    # deja calcule, stocke dans la session.
+    # rapprochement Gemini a chaque fois (bug remonte). On ne re-EXTRAIT le
+    # fichier que s'il a change (nom+taille) - l'extraction ne depend pas de
+    # l'agence, la refaire pour un simple changement de filtre gaspillerait
+    # un appel Gemini couteux pour rien. Le RAPPROCHEMENT (candidats +
+    # arbitrage), lui, depend de l'agence - cache separe, cle = fichier +
+    # agence, pour re-matcher sans re-extraire quand on change juste le filtre.
     identifiant_fichier = f"{fichier.name}_{fichier.size}"
     stepper_placeholder = st.empty()
 
@@ -196,6 +213,16 @@ if fichier is not None:
             resultat = extract_pdf_sans_prix(fichier.getvalue(), filename=fichier.name)
 
         st.success(f"{len(resultat.items)} ligne(s) de désignation extraite(s) du PDF.")
+        st.session_state["prix_fichier_traite"] = identifiant_fichier
+        st.session_state["prix_extraction"] = resultat
+        # Nouveau fichier -> tout rapprochement precedent (autre fichier)
+        # n'est plus valide, quelle que soit l'agence choisie.
+        st.session_state.pop("prix_cle_matching", None)
+
+    resultat = st.session_state["prix_extraction"]
+    cle_matching = f"{identifiant_fichier}::{agence_filtre or 'TOUTES'}"
+
+    if st.session_state.get("prix_cle_matching") != cle_matching:
         _rendre_stepper(stepper_placeholder, "rapprochement")
 
         # Etape 1 : pre-filtre rapide et gratuit (texte + unite + memes nombres)
@@ -220,13 +247,13 @@ if fichier is not None:
                 """
                 SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
                        similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
-                FROM prix_moyen_par_designation
+                FROM prix_moyen_par_designation_fn(%s)
                 WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
                   AND nombres_texte(designation) = nombres_texte(%s)
                 ORDER BY score DESC
                 LIMIT 20
                 """,
-                conn, params=(item.designation, item.unite, item.designation),
+                conn, params=(item.designation, agence_filtre, item.unite, item.designation),
             )
             # Sur un resultat vide, pd.read_sql + psycopg renvoie un DataFrame
             # sans colonnes -> sort_values("score") leverait un KeyError.
@@ -252,13 +279,13 @@ if fichier is not None:
                     """
                     SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
                            similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
-                    FROM prix_moyen_par_designation
+                    FROM prix_moyen_par_designation_fn(%s)
                     WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
                       AND nombres_tab(designation) <@ nombres_tab(%s)
                     ORDER BY score DESC
                     LIMIT 5
                     """,
-                    conn, params=(item.designation, item.unite, item.designation),
+                    conn, params=(item.designation, agence_filtre, item.unite, item.designation),
                 )
                 if not candidats.empty:
                     sens_bordereau = _sens_comparaison(item.designation)
@@ -351,10 +378,11 @@ if fichier is not None:
                     "prix_proposition": None if meilleur is None else float(meilleur["prix_moyen_corrige"]),
                 })
 
-        # Resultat mis en cache dans la session : les prochains re-runs du
-        # script (ex. clic sur "Telecharger en CSV") reutilisent ce resultat
-        # au lieu de tout recalculer, tant que le meme fichier reste charge.
-        st.session_state["prix_fichier_traite"] = identifiant_fichier
+        # Resultat de rapprochement mis en cache (cle fichier+agence) : les
+        # prochains re-runs du script (ex. clic sur "Telecharger en CSV")
+        # reutilisent ce resultat sans re-matcher, tant que ni le fichier ni
+        # l'agence choisie n'ont change.
+        st.session_state["prix_cle_matching"] = cle_matching
         st.session_state["prix_df_resultat"] = pd.DataFrame(lignes_resultat)
 
     # Etat final (fait ou reutilise du cache) : les 3 etapes passent a "fait".
