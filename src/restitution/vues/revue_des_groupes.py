@@ -48,6 +48,27 @@ st.caption(
     "composition, ou retire une ligne si le regroupement te semble faux."
 )
 
+# Une agence = un dossier SharePoint de premier niveau (Paris, Amiens...),
+# meme convention que les autres pages. Un groupe n'appartient PAS a une
+# seule agence (ses membres peuvent venir de documents d'agences differentes,
+# voir CLAUDE.md - ex reel : "Installation de chantier" partagee entre
+# Amiens et Valenciennes) - le filtre ne restreint donc QUE la LISTE des
+# groupes proposee (ceux ayant au moins un membre dans l'agence choisie).
+# Une fois un groupe ouvert, TOUS ses membres restent affiches, de TOUTES
+# les agences : c'est justement ce qui permet de reperer un melange errone
+# entre deux agences - les cacher irait a l'encontre du but de cette page.
+agences_disponibles = pd.read_sql(
+    "SELECT DISTINCT agence FROM price_documents WHERE agence IS NOT NULL ORDER BY agence", conn
+)
+TOUTES_AGENCES = "Toutes les agences"
+agence_choisie = st.selectbox("Agence", options=[TOUTES_AGENCES] + agences_disponibles["agence"].tolist())
+agence_filtre = None if agence_choisie == TOUTES_AGENCES else agence_choisie
+if agence_filtre:
+    st.caption(
+        f"Liste limitée aux groupes ayant au moins un membre dans « {agence_filtre} ». "
+        "Une fois un groupe ouvert, tous ses membres restent visibles, quelle que soit leur agence."
+    )
+
 seuil_auto_actuel = float(
     pd.read_sql("SELECT seuil_auto_validation FROM parametres WHERE id = 1", conn)["seuil_auto_validation"].iloc[0]
 )
@@ -106,9 +127,14 @@ filtre = st.radio(
     [FILTRE_GEMINI, FILTRE_SANS_GEMINI, FILTRE_TOUS],
     horizontal=True,
 )
+# strpos(...) > 0 plutot que LIKE '%|%' : cette requete a maintenant un
+# parametre agence (voir plus bas) - psycopg scanne TOUT le texte de la
+# requete des qu'elle a des parametres, y compris un "%" a l'interieur d'un
+# LIKE inseré via f-string, et le fait planter (piege reel deja rencontre,
+# voir CLAUDE.md/historique). strpos evite le probleme a la racine.
 condition_sql = {
-    FILTRE_GEMINI: "g.membres_signature LIKE '%|%'",
-    FILTRE_SANS_GEMINI: "g.membres_signature NOT LIKE '%|%'",
+    FILTRE_GEMINI: "strpos(g.membres_signature, '|') > 0",
+    FILTRE_SANS_GEMINI: "strpos(coalesce(g.membres_signature, ''), '|') = 0",
     FILTRE_TOUS: "true",
 }[filtre]
 
@@ -124,10 +150,20 @@ groupes_df = pd.read_sql(
      AND pl.sous_famille_canonique IS NOT DISTINCT FROM g.sous_famille
      AND pl.unite_canonique IS NOT DISTINCT FROM g.unite
     WHERE {condition_sql}
+      AND (%s::text IS NULL OR EXISTS (
+          SELECT 1
+          FROM price_lines pl2
+          JOIN price_documents pd2 ON pd2.id = pl2.document_id
+          WHERE coalesce(pl2.designation_canonique, pl2.designation) = g.designation_canonique
+            AND pl2.sous_famille_canonique IS NOT DISTINCT FROM g.sous_famille
+            AND pl2.unite_canonique IS NOT DISTINCT FROM g.unite
+            AND pd2.agence = %s
+      ))
     GROUP BY g.id, g.designation_canonique, g.sous_famille, g.unite, g.valide, g.seuil_confiance
     ORDER BY g.valide ASC, nb_en_attente DESC, nb_membres DESC
     """,
     conn,
+    params=(agence_filtre, agence_filtre),
 )
 
 if groupes_df.empty:
@@ -172,7 +208,7 @@ col3.metric("Seuil de confiance", f"{seuil_confiance:.2f}")
 membres_df = pd.read_sql(
     """
     SELECT pl.id, pl.designation, pl.sous_famille, pl.unite, pl.chapitre,
-           pl.prix_unitaire, pl.montant_ht, pd.filename AS document, pl.en_attente
+           pl.prix_unitaire, pl.montant_ht, pd.filename AS document, pd.agence, pl.en_attente
     FROM price_lines pl
     JOIN price_documents pd ON pd.id = pl.document_id
     WHERE coalesce(pl.designation_canonique, pl.designation) = %s
@@ -183,6 +219,11 @@ membres_df = pd.read_sql(
     conn,
     params=(canon, sf, u),
 )
+if membres_df["agence"].nunique() > 1:
+    st.caption(
+        f"⚠️ Ce groupe mélange {membres_df['agence'].nunique()} agences distinctes "
+        f"({', '.join(sorted(membres_df['agence'].dropna().unique()))}) — à vérifier si c'est bien voulu."
+    )
 
 
 def _colorer(row):
@@ -202,6 +243,7 @@ st.dataframe(
         "prix_unitaire": st.column_config.NumberColumn("Prix unitaire (€)", format="%.2f"),
         "montant_ht": st.column_config.NumberColumn("Montant HT (€)", format="%.2f"),
         "document": "Document",
+        "agence": "Agence",
         "en_attente": "En attente",
     },
 )
