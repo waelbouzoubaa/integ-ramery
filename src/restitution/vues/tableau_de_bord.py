@@ -106,9 +106,14 @@ stats = pd.read_sql(
         (SELECT count(*) FROM agence_designations)                           AS total_designations,
         (SELECT count(*) FROM agence_groupes)                                AS total_groupes,
         (SELECT count(*) FROM agence_groupes WHERE valide)                   AS groupes_valides,
-        -- strpos(...) > 0 <=> contient "|" (2+ orthographes distinctes
-        -- fusionnees, voir fusion_designations.py) - evite d'echapper les
-        -- "%" d'un LIKE dans une requete qui a par ailleurs des parametres.
+        -- strpos(...) > 0 <=> contient le separateur "|" (2+ orthographes
+        -- distinctes fusionnees, voir fusion_designations.py). Evite LIKE
+        -- ici : psycopg3 scanne TOUT le texte de la requete (commentaires
+        -- compris) a la recherche de placeholders des qu'elle a par
+        -- ailleurs des parametres - le caractere pourcent (seul, ou suivi
+        -- de la lettre s/b/t) y est toujours interprete, jamais litteral
+        -- dans un commentaire. Piege reel rencontre : ce caractere doit
+        -- rester totalement absent de tout texte SQL parametre.
         (SELECT count(*) FROM agence_groupes
          WHERE strpos(membres_signature, '|') > 0)                           AS groupes_avec_gemini,
         (SELECT count(*) FROM agence_groupes
