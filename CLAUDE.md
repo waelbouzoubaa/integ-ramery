@@ -164,6 +164,36 @@ via le delta SharePoint normal et se recharge depuis le JSON déjà en cache
 un `COALESCE` côté `UPDATE` - seul un appel qui CONNAÎT vraiment l'agence
 (le watcher) peut la modifier.
 
+**Filtre par agence dans l'UI, page par page (décisions assumées, pas à
+réinventer)** :
+- **Prix unitaires, Recherche de prix, Tableau de bord** : sélecteur
+  "Agence" qui RECALCULE tout sur le sous-ensemble choisi, via
+  `prix_moyen_par_designation_fn(agence)` - jamais un filtre visuel après
+  coup. Ces pages répondent à "combien ça coûte", une question dont la
+  réponse varie légitimement selon l'agence.
+- **Revue des groupes : PAS de filtre par agence, volontairement.** Un
+  groupe n'appartient pas à une seule agence (ses membres peuvent venir de
+  documents d'agences différentes - ex réel : "Installation de chantier"
+  partagée entre Amiens et Valenciennes). Cette page répond à "est-ce que X
+  et Y désignent le même produit", une question dont la réponse est
+  identique partout, quelle que soit l'agence. Filtrer une question
+  invariante par agence n'apporte rien, et retire la visibilité là où elle
+  compte le plus : un mauvais regroupement a plus de chances de se cacher
+  précisément dans un groupe qui mélange plusieurs agences (vocabulaires
+  différents), pas dans un groupe mono-agence. À la place : la colonne
+  `agence` dans le détail des membres et une alerte automatique si un
+  groupe ouvert mélange plusieurs agences distinctes - jamais rien de caché.
+  (Un filtre par agence sur la LISTE des groupes, laissant le détail
+  toujours global, a été testé puis retiré pour cette raison - ne pas le
+  réintroduire sans une nouvelle raison concrète.)
+- Piège rencontré deux fois sur ce sujet : psycopg scanne TOUT le texte
+  d'une requête à la recherche de placeholders dès qu'elle reçoit des
+  paramètres - un `%` isolé (même dans un commentaire SQL, même dans un
+  `LIKE '%...%'` injecté via f-string) fait planter avec
+  `only '%s', '%b', '%t' are allowed as placeholders`. Préférer `strpos(x,
+  'motif') > 0` à `LIKE '%motif%'` dès qu'une requête a le moindre paramètre
+  - évite le problème à la racine plutôt que de doubler les `%%`.
+
 ## Pièges Windows / Docker déjà rencontrés
 
 - **Git Bash + `docker exec`/`docker compose exec`** : préfixer

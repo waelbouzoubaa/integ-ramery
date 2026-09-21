@@ -48,27 +48,20 @@ st.caption(
     "composition, ou retire une ligne si le regroupement te semble faux."
 )
 
-# Une agence = un dossier SharePoint de premier niveau (Paris, Amiens...),
-# meme convention que les autres pages. Un groupe n'appartient PAS a une
-# seule agence (ses membres peuvent venir de documents d'agences differentes,
-# voir CLAUDE.md - ex reel : "Installation de chantier" partagee entre
-# Amiens et Valenciennes) - le filtre ne restreint donc QUE la LISTE des
-# groupes proposee (ceux ayant au moins un membre dans l'agence choisie).
-# Une fois un groupe ouvert, TOUS ses membres restent affiches, de TOUTES
-# les agences : c'est justement ce qui permet de reperer un melange errone
-# entre deux agences - les cacher irait a l'encontre du but de cette page.
-agences_disponibles = pd.read_sql(
-    "SELECT DISTINCT agence FROM price_documents WHERE agence IS NOT NULL ORDER BY agence", conn
-)
-TOUTES_AGENCES = "Toutes les agences"
-agence_choisie = st.selectbox("Agence", options=[TOUTES_AGENCES] + agences_disponibles["agence"].tolist())
-agence_filtre = None if agence_choisie == TOUTES_AGENCES else agence_choisie
-if agence_filtre:
-    st.caption(
-        f"Liste limitée aux groupes ayant au moins un membre dans « {agence_filtre} ». "
-        "Une fois un groupe ouvert, tous ses membres restent visibles, quelle que soit leur agence."
-    )
-
+# PAS de filtre par agence sur cette page (contrairement a Prix unitaires,
+# Recherche de prix et Tableau de bord) - decision de conception assumee,
+# pas un oubli. Ces trois autres pages repondent a "combien ca coute", une
+# question dont la reponse varie legitimement selon l'agence (prix reels
+# differents). Cette page repond a "est-ce que X et Y designent le meme
+# produit" - une question dont la reponse est identique partout, quelle que
+# soit l'agence qui a soumis le document. Filtrer une question invariante
+# par agence n'apporte rien, et retire au contraire la visibilite la ou elle
+# compte le plus : un mauvais regroupement a plus de chances de se cacher
+# PRECISEMENT dans un groupe qui melange plusieurs agences (vocabulaires/
+# conventions differents entre agences), pas dans un groupe mono-agence -
+# masquer ce contexte irait a l'encontre du but meme de cette page. Voir
+# plus bas : la colonne "agence" et l'alerte de melange dans le detail d'un
+# groupe servent deja cet objectif, sans jamais rien cacher.
 seuil_auto_actuel = float(
     pd.read_sql("SELECT seuil_auto_validation FROM parametres WHERE id = 1", conn)["seuil_auto_validation"].iloc[0]
 )
@@ -127,11 +120,13 @@ filtre = st.radio(
     [FILTRE_GEMINI, FILTRE_SANS_GEMINI, FILTRE_TOUS],
     horizontal=True,
 )
-# strpos(...) > 0 plutot que LIKE '%|%' : cette requete a maintenant un
-# parametre agence (voir plus bas) - psycopg scanne TOUT le texte de la
-# requete des qu'elle a des parametres, y compris un "%" a l'interieur d'un
-# LIKE inseré via f-string, et le fait planter (piege reel deja rencontre,
-# voir CLAUDE.md/historique). strpos evite le probleme a la racine.
+# strpos(...) > 0 plutot que LIKE '%|%' : equivalent strict, evite tout
+# risque futur si cette requete gagne un jour des parametres (psycopg scanne
+# alors TOUT le texte de la requete a la recherche de placeholders, y compris
+# un "%" injecte via LIKE dans un f-string - piege reel deja rencontre sur
+# cette meme page, voir historique/CLAUDE.md). Pas de parametre ici
+# actuellement : PAS de filtre par agence sur cette page, decision assumee
+# (voir commentaire en tete de fichier).
 condition_sql = {
     FILTRE_GEMINI: "strpos(g.membres_signature, '|') > 0",
     FILTRE_SANS_GEMINI: "strpos(coalesce(g.membres_signature, ''), '|') = 0",
@@ -150,20 +145,10 @@ groupes_df = pd.read_sql(
      AND pl.sous_famille_canonique IS NOT DISTINCT FROM g.sous_famille
      AND pl.unite_canonique IS NOT DISTINCT FROM g.unite
     WHERE {condition_sql}
-      AND (%s::text IS NULL OR EXISTS (
-          SELECT 1
-          FROM price_lines pl2
-          JOIN price_documents pd2 ON pd2.id = pl2.document_id
-          WHERE coalesce(pl2.designation_canonique, pl2.designation) = g.designation_canonique
-            AND pl2.sous_famille_canonique IS NOT DISTINCT FROM g.sous_famille
-            AND pl2.unite_canonique IS NOT DISTINCT FROM g.unite
-            AND pd2.agence = %s
-      ))
     GROUP BY g.id, g.designation_canonique, g.sous_famille, g.unite, g.valide, g.seuil_confiance
     ORDER BY g.valide ASC, nb_en_attente DESC, nb_membres DESC
     """,
     conn,
-    params=(agence_filtre, agence_filtre),
 )
 
 if groupes_df.empty:
