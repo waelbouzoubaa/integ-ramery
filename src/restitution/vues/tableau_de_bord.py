@@ -46,38 +46,84 @@ conn = get_conn()
 st.title("Tableau de bord")
 st.caption("Vue d'ensemble de l'état de la base de prix : volume de données, regroupement des désignations, anomalies.")
 
+# Une agence = un dossier SharePoint de premier niveau (Paris, Amiens...),
+# meme principe et memes noms que le selecteur de Prix unitaires/Recherche de
+# prix - duplique volontairement ici (chaque vue Streamlit est un script
+# independant). "Toutes les agences" = comportement inchange (agence=NULL).
+# Recalcule les compteurs sur le sous-ensemble choisi (pas un filtre visuel
+# apres coup) - SAUF la section "Repartition par agence" plus bas, qui reste
+# TOUJOURS une vue globale (elle sert justement a comparer les agences entre
+# elles, la filtrer sur une seule la rendrait triviale).
+agences_disponibles = pd.read_sql(
+    "SELECT DISTINCT agence FROM price_documents WHERE agence IS NOT NULL ORDER BY agence", conn
+)
+TOUTES_AGENCES = "Toutes les agences"
+agence_choisie = st.selectbox("Agence", options=[TOUTES_AGENCES] + agences_disponibles["agence"].tolist())
+agence_filtre = None if agence_choisie == TOUTES_AGENCES else agence_choisie
+
 # Une seule requete regroupant tous les compteurs simples (evite plusieurs
 # aller-retours) : lignes/documents bruts, designations (vue), groupes,
 # anomalies. "designations sans groupe" = lignes de la vue pour lesquelles
 # aucun groupe forme ne correspond (soit jamais fusionnees, soit une seule
 # orthographe existante - pas forcement un probleme, voir page Revue des
 # groupes pour le detail).
+# "WITH param" : un SEUL parametre agence, reutilise partout via CROSS JOIN -
+# evite de repeter/compter %s a la main pour chaque sous-requete.
+# Un groupe n'appartient PAS a une seule agence (ses membres peuvent venir de
+# documents d'agences differentes, voir CLAUDE.md) : un groupe compte dans le
+# filtre "Amiens" s'il a AU MOINS UN membre dans cette agence (agence_groupes
+# ci-dessous) - c'est la comptabilisation "au moins un document concerne",
+# pas "exclusivement cette agence".
 stats = pd.read_sql(
     """
+    WITH param AS (
+        SELECT %s::text AS agence
+    ),
+    agence_lignes AS (
+        SELECT pl.*
+        FROM price_lines pl
+        JOIN price_documents pd ON pd.id = pl.document_id
+        CROSS JOIN param
+        WHERE param.agence IS NULL OR pd.agence = param.agence
+    ),
+    agence_designations AS (
+        SELECT f.*
+        FROM param
+        CROSS JOIN LATERAL prix_moyen_par_designation_fn(param.agence) f
+    ),
+    agence_groupes AS (
+        SELECT DISTINCT g.*
+        FROM groupes g
+        JOIN agence_lignes pl
+          ON coalesce(pl.designation_canonique, pl.designation) = g.designation_canonique
+         AND pl.sous_famille_canonique IS NOT DISTINCT FROM g.sous_famille
+         AND pl.unite_canonique IS NOT DISTINCT FROM g.unite
+    )
     SELECT
-        (SELECT count(*) FROM price_lines)                                   AS total_lignes,
-        (SELECT count(*) FROM price_documents)                               AS total_documents,
-        (SELECT count(*) FROM prix_moyen_par_designation)                    AS total_designations,
-        (SELECT count(*) FROM groupes)                                       AS total_groupes,
-        (SELECT count(*) FROM groupes WHERE valide)                          AS groupes_valides,
-        -- membres_signature contient "|" uniquement quand 2+ orthographes
-        -- distinctes ont ete fusionnees (voir fusion_designations.py) - sans
-        -- "|", le groupe n'a qu'une seule orthographe repetee (rien a
-        -- decider, auto-valide SANS Gemini). Les deux comptent comme un
-        -- "groupe" (2+ designations, meme orthographe ou pas), mais seul le
-        -- premier cas a reellement necessite un jugement Gemini.
-        (SELECT count(*) FROM groupes WHERE membres_signature LIKE '%|%')     AS groupes_avec_gemini,
-        (SELECT count(*) FROM groupes WHERE membres_signature NOT LIKE '%|%') AS groupes_sans_gemini,
-        (SELECT count(*) FROM prix_moyen_par_designation v
+        (SELECT count(*) FROM price_documents pd CROSS JOIN param
+         WHERE param.agence IS NULL OR pd.agence = param.agence)             AS total_documents,
+        (SELECT count(*) FROM agence_lignes)                                 AS total_lignes,
+        (SELECT count(*) FROM agence_designations)                           AS total_designations,
+        (SELECT count(*) FROM agence_groupes)                                AS total_groupes,
+        (SELECT count(*) FROM agence_groupes WHERE valide)                   AS groupes_valides,
+        -- strpos(...) > 0 <=> contient "|" (2+ orthographes distinctes
+        -- fusionnees, voir fusion_designations.py) - evite d'echapper les
+        -- "%" d'un LIKE dans une requete qui a par ailleurs des parametres.
+        (SELECT count(*) FROM agence_groupes
+         WHERE strpos(membres_signature, '|') > 0)                           AS groupes_avec_gemini,
+        (SELECT count(*) FROM agence_groupes
+         WHERE strpos(coalesce(membres_signature, ''), '|') = 0)             AS groupes_sans_gemini,
+        (SELECT count(*) FROM agence_designations v
          WHERE NOT EXISTS (
-             SELECT 1 FROM groupes g
+             SELECT 1 FROM agence_groupes g
              WHERE g.designation_canonique = v.designation
                AND g.sous_famille IS NOT DISTINCT FROM v.sous_famille
                AND g.unite IS NOT DISTINCT FROM v.unite
          ))                                                                  AS designations_sans_groupe,
-        (SELECT count(*) FROM prix_moyen_par_designation WHERE anomalie_detectee) AS anomalies
+        (SELECT count(*) FROM agence_designations WHERE anomalie_detectee)   AS anomalies
     """,
     conn,
+    params=(agence_filtre,),
 ).iloc[0]
 
 st.subheader("Vue d'ensemble")
@@ -120,6 +166,10 @@ st.divider()
 # explicitement plutot que de le compter silencieusement dans une agence,
 # pour reperer tout de suite un rescan complet a faire (voir CLAUDE.md).
 st.subheader("Répartition par agence")
+st.caption(
+    "Vue globale de comparaison entre agences, TOUJOURS sur toute la base — "
+    "indépendante du filtre « Agence » choisi ci-dessus."
+)
 agences_stats = pd.read_sql(
     """
     SELECT
@@ -189,7 +239,9 @@ col_gauche, col_droite = st.columns(2)
 with col_gauche:
     st.subheader("Répartition des désignations par nombre d'occurrences")
     st.caption("Combien de fois chaque désignation apparaît dans les documents — plus il y en a, plus la moyenne est fiable.")
-    occ_df = pd.read_sql("SELECT nb_occurrences FROM prix_moyen_par_designation", conn)
+    occ_df = pd.read_sql(
+        "SELECT nb_occurrences FROM prix_moyen_par_designation_fn(%s)", conn, params=(agence_filtre,)
+    )
 
     def _bucket(n):
         if n == 1:
@@ -245,12 +297,13 @@ st.caption("Les 10 sous-familles regroupant le plus de désignations distinctes 
 top_sf = pd.read_sql(
     """
     SELECT coalesce(sous_famille, '(aucune)') AS sous_famille, count(*) AS nb_designations
-    FROM prix_moyen_par_designation
+    FROM prix_moyen_par_designation_fn(%s)
     GROUP BY sous_famille
     ORDER BY nb_designations DESC
     LIMIT 10
     """,
     conn,
+    params=(agence_filtre,),
 ).set_index("sous_famille")
 st.bar_chart(top_sf)
 
@@ -272,10 +325,14 @@ journal_df = pd.read_sql(
                pd.imported_at                               AS date_evenement
         FROM price_documents pd
         LEFT JOIN price_lines pl ON pl.document_id = pd.id
+        WHERE %s::text IS NULL OR pd.agence = %s
         GROUP BY pd.id, pd.filename, pd.agence, pd.imported_at
 
         UNION ALL
 
+        -- Les echecs n'ont pas d'agence en base (echecs_traitement n'a pas
+        -- cette colonne) : toujours affiches quel que soit le filtre, pour
+        -- ne jamais masquer un fichier perdu par un choix d'agence.
         SELECT regexp_replace(filename, '\\.pdf$', '', 'i')  AS filename,
                NULL                                          AS agence,
                'Échec'                                       AS statut,
@@ -287,9 +344,12 @@ journal_df = pd.read_sql(
     ORDER BY date_evenement DESC
     """,
     conn,
+    params=(agence_filtre, agence_filtre),
 )
 
 st.subheader("Journal des fichiers traités")
+if agence_filtre:
+    st.caption(f"Documents traités filtrés sur « {agence_filtre} » — les échecs restent toujours affichés (non attribuables de façon fiable à une agence).")
 st.metric("Fichiers traités au total", len(journal_df))
 st.dataframe(
     journal_df,
