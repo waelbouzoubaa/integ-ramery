@@ -9,3 +9,4 @@ __pycache__/
 data/test/
 CLAUDE.md
 docs/
+docker-compose.override.yml
