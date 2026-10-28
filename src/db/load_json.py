@@ -11,11 +11,18 @@ OUT_DIR = Path(__file__).resolve().parent.parent.parent / "out"
 SCHEMA_FILE = Path(__file__).resolve().parent / "schema.sql"
 
 
-def get_conn():
+def get_conn(autocommit: bool = False):
+    """autocommit=True pour une boucle de file d'attente (voir
+    _boucle_jobs_recherche_prix dans pdf_watcher.py, meme principe que
+    lib/db.py du projet file-diff-ramery) : chaque instruction se valide
+    independamment, une erreur sur l'une n'empeche jamais les suivantes sur
+    la meme connexion (contrairement au mode transactionnel par defaut, ou
+    une erreur laisse la transaction "aborted" jusqu'a un rollback explicite
+    - piege deja rencontre en pratique)."""
     pgurl = os.getenv("PGURL")
     if not pgurl:
         raise RuntimeError("PGURL manquant dans .env")
-    return psycopg.connect(pgurl)
+    return psycopg.connect(pgurl, autocommit=autocommit)
 
 
 def ensure_schema(conn):

@@ -1,5 +1,6 @@
 import sys
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -10,9 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "extraction"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "db"))
 
 from sharepoint_client import get_headers, get_site_id, get_drive_id
-from config import POLL_INTERVAL
+from config import POLL_INTERVAL, RECHERCHE_PRIX_WORKERS
 from gemini_extract import extract_pdf
 from load_json import get_conn, ensure_schema, load_items
+from recherche_prix import traiter_bordereau
 
 # Incident reel : "CANAPLES...pdf" perdu silencieusement sur une coupure
 # reseau pendant le telechargement (connexion coupee vers
@@ -233,6 +235,132 @@ def process_changes(items, file_cache, conn):
         handle_pdf(name, file_bytes, item, conn, chemin=full_path, agence=agence)
 
 
+# Au-dela de ce delai sans nouvelle depuis le debut du traitement, une
+# demande "en_cours" est consideree comme abandonnee (watcher mort ou
+# redemarre en plein travail) et remise en file - jusqu'a MAX_TENTATIVES
+# fois, ensuite elle part en erreur plutot que de boucler indefiniment.
+# Memes valeurs que le projet file-diff-ramery (lib/db.py), qui a le meme
+# pattern de file d'attente - 20 min plutot que leurs 15 : notre pipeline
+# (extraction + arbitrage Gemini par lots) est plus long, un job de 174
+# lignes a deja pris ~7 min en pratique.
+DELAI_BLOCAGE_MINUTES = 20
+MAX_TENTATIVES_RECHERCHE_PRIX = 3
+
+
+def _requeue_jobs_bloques(conn) -> None:
+    """Remet en 'en_attente' une demande bloquee en 'en_cours' depuis trop
+    longtemps, ou la fait echouer si deja retentee trop de fois - voir
+    DELAI_BLOCAGE_MINUTES/MAX_TENTATIVES_RECHERCHE_PRIX ci-dessus."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE recherche_prix_jobs
+            SET statut = 'en_attente', etape = NULL, demarre_le = NULL, attempts = attempts + 1
+            WHERE statut = 'en_cours'
+              AND demarre_le < now() - (%s * interval '1 minute')
+              AND attempts < %s
+            RETURNING id
+            """,
+            (DELAI_BLOCAGE_MINUTES, MAX_TENTATIVES_RECHERCHE_PRIX),
+        )
+        for (job_id,) in cur.fetchall():
+            print(f"[recherche_prix] demande {job_id} bloquee, remise en attente")
+
+        cur.execute(
+            """
+            UPDATE recherche_prix_jobs
+            SET statut = 'erreur', termine_le = now(),
+                erreur = 'Traitement interrompu a repetition (watcher redemarre en plein travail).'
+            WHERE statut = 'en_cours'
+              AND demarre_le < now() - (%s * interval '1 minute')
+              AND attempts >= %s
+            RETURNING id
+            """,
+            (DELAI_BLOCAGE_MINUTES, MAX_TENTATIVES_RECHERCHE_PRIX),
+        )
+        for (job_id,) in cur.fetchall():
+            print(f"[recherche_prix] demande {job_id} abandonnee apres {MAX_TENTATIVES_RECHERCHE_PRIX} tentatives")
+
+
+def _traiter_un_job_recherche_prix(conn) -> bool:
+    """Essaie de prendre et traiter UNE demande "Recherche de prix" en
+    attente (voir recherche_prix_jobs dans schema.sql - deposee par
+    recherche_de_prix.py, traitee ici en arriere-plan pour ne plus rien
+    perdre au rafraichissement de la page). UPDATE...RETURNING avec FOR
+    UPDATE SKIP LOCKED : pioche atomiquement la plus ancienne demande sans
+    jamais pouvoir en traiter deux fois la meme (securite qui ne coute rien
+    meme a un seul watcher, et protege un futur passage a plusieurs
+    instances). Retourne True si une demande a ete prise (succes ou erreur),
+    False si la file etait vide.
+
+    conn est en autocommit (voir _boucle_jobs_recherche_prix) : chaque
+    instruction se valide independamment, pas de rollback() a gerer meme
+    si une etape echoue - piege deja rencontre avec une connexion
+    transactionnelle classique (une erreur SQL y laisse TOUTE commande
+    suivante en echec jusqu'a un rollback explicite)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE recherche_prix_jobs
+            SET statut = 'en_cours', demarre_le = now()
+            WHERE id = (
+                SELECT id FROM recherche_prix_jobs
+                WHERE statut = 'en_attente'
+                ORDER BY cree_le
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            RETURNING id, fichier_nom, fichier_octets, agence
+            """
+        )
+        row = cur.fetchone()
+
+    if row is None:
+        return False
+
+    job_id, nom, octets, agence = row
+    print(f"[recherche_prix] traitement demande {job_id} ({nom})")
+
+    def _etape(e: str) -> None:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE recherche_prix_jobs SET etape = %s WHERE id = %s", (e, job_id))
+
+    try:
+        lignes = traiter_bordereau(conn, bytes(octets), nom, agence, on_etape=_etape)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE recherche_prix_jobs SET statut = 'termine', resultat = %s::jsonb, termine_le = now() WHERE id = %s",
+                (json.dumps(lignes), job_id),
+            )
+        print(f"[recherche_prix] demande {job_id} terminee ({len(lignes)} ligne(s))")
+    except Exception as exc:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE recherche_prix_jobs SET statut = 'erreur', erreur = %s, termine_le = now() WHERE id = %s",
+                (repr(exc), job_id),
+            )
+        print(f"[recherche_prix] demande {job_id} en erreur : {exc!r}")
+
+    return True
+
+
+def _boucle_jobs_recherche_prix() -> None:
+    """Tourne dans un thread separe de la boucle SharePoint principale (voir
+    run()) : une demande de Recherche de prix doit etre prise en charge en
+    quelques secondes, independamment de POLL_INTERVAL (souvent plusieurs
+    minutes) utilise pour le scan SharePoint. Connexion Postgres dediee en
+    autocommit - une connexion psycopg ne se partage pas entre threads."""
+    conn = get_conn(autocommit=True)
+    while True:
+        try:
+            _requeue_jobs_bloques(conn)
+            traite = _traiter_un_job_recherche_prix(conn)
+        except Exception as exc:
+            print(f"[recherche_prix] erreur inattendue dans la boucle : {exc!r}")
+            traite = False
+        time.sleep(0 if traite else 2)
+
+
 def run(once: bool = False):
     print("Watcher SharePoint (PDF) demarre")
     site_id = get_site_id()
@@ -241,6 +369,19 @@ def run(once: bool = False):
 
     conn = get_conn()
     ensure_schema(conn)
+
+    # Demarre en parallele de la boucle SharePoint principale, pas a la
+    # place : les demandes "Recherche de prix" ne doivent pas attendre le
+    # prochain cycle SharePoint (POLL_INTERVAL, souvent plusieurs minutes).
+    # Plusieurs workers (RECHERCHE_PRIX_WORKERS) : plusieurs demandes
+    # deposees en meme temps se traitent simultanement au lieu de s'empiler
+    # une par une - chaque worker a sa propre connexion, le pickup atomique
+    # (FOR UPDATE SKIP LOCKED dans _traiter_un_job_recherche_prix) garantit
+    # qu'ils ne prennent jamais deux fois la meme demande.
+    for i in range(RECHERCHE_PRIX_WORKERS):
+        threading.Thread(
+            target=_boucle_jobs_recherche_prix, daemon=True, name=f"recherche-prix-jobs-{i}"
+        ).start()
 
     delta_link, file_cache = load_state(drive_id)
     if not delta_link:

@@ -6,138 +6,50 @@ import pandas as pd
 import psycopg
 import streamlit as st
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from pydantic import BaseModel
 
 load_dotenv()
 
-# gemini_extract.py vit dans src/extraction, pas dans src/restitution : on
-# l'ajoute au path pour reutiliser directement extract_pdf_sans_prix, sans
-# dupliquer la logique d'appel Gemini ici (meme pattern que
-# revue_des_groupes.py pour fusion_designations).
-EXTRACTION_DIR = Path(__file__).resolve().parents[2] / "extraction"
-if str(EXTRACTION_DIR) not in sys.path:
-    sys.path.insert(0, str(EXTRACTION_DIR))
+# recherche_prix.py (le pipeline extraction+rapprochement+arbitrage) vit
+# dans src/db, pas dans src/restitution - mais cette page ne l'appelle plus
+# directement : la demande est deposee en base (recherche_prix_jobs) et
+# traitee en ARRIERE-PLAN par le watcher (voir pdf_watcher.py). Meme
+# principe que la file d'attente du projet file-diff-ramery (lib/db.py) :
+# la page affiche TOUTES les demandes (liste chronologique), pas une seule
+# suivie via un lien a conserver - fermer/rouvrir la page, ou revenir
+# n'importe quand, montre simplement la liste a jour.
 DB_DIR = Path(__file__).resolve().parents[2] / "db"
 if str(DB_DIR) not in sys.path:
     sys.path.insert(0, str(DB_DIR))
 
-from gemini_extract import extract_pdf_sans_prix  # noqa: E402
-from fusion_designations import _retry_surcharge, _sens_comparaison, memes_nombres, parse_reponse  # noqa: E402
+STATUT_LABELS = {
+    "en_attente": "⏳ En attente",
+    "en_cours": "⚙️ En cours de traitement",
+    "termine": "✅ Terminé",
+    "erreur": "❌ Erreur",
+}
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
-TAILLE_LOT = 20  # lignes de bordereau par appel Gemini (garde le prompt raisonnable)
-
-PROMPT_RAPPROCHEMENT = """Tu reçois des lignes de désignation issues d'un bordereau de prix BTP VIERGE
-(sans prix), et pour chacune une courte liste de candidats trouvés dans une
-base de prix existante (déjà pré-filtrés par ressemblance de texte et même
-unité). Pour CHAQUE ligne, détermine si un des candidats décrit RÉELLEMENT LE
-MÊME PRODUIT que la désignation du bordereau (permettant de réutiliser son
-prix moyen), ou si aucun candidat ne correspond vraiment.
-
-Sois strict : une différence de nature du produit (matériau fourni vs
-matériau réutilisé/existant sur site, classe, diamètre, épaisseur, méthode
-de pose) rend deux désignations NON équivalentes, même si le texte se
-ressemble beaucoup. Dans le doute, réponds qu'aucun candidat ne correspond
-plutôt que de choisir au hasard.
-
-Nuance importante : un candidat plus DÉTAILLÉ que la ligne du bordereau,
-mais sans contradiction avec elle, décrit le MÊME produit — accepte-le.
-Exemples réels : "Tête d'aqueduc de sécurité Ø < 400 mm" pour "Tête
-d'aqueduc pour Ø < 400 mm" ; "peinture thermoplastique blanche" pour "en
-peinture" ; "Grave Non Traitée type B (GNT 2) 0/31.5" pour "GNT 2 (GNT B)
-0/31.5" ; "About fonte type T" pour "About en fonte de type T ou A".
-Rejette uniquement en cas de contradiction réelle : matériau différent
-(fonte vs PVC, peinture vs résine, béton vs résine), classe ou type
-différent (CC2 vs CS2, simple vs double gravillonnage), fourni vs
-réutilisé, opération différente (dépose vs fourniture, démolition vs
-réfection), ou prestation supplémentaire qui change le prix (ex : "y
-compris tranchée" quand le bordereau ne la demande pas).
-
-Réponds pour CHAQUE id reçu, dans le même ordre : l'index (0-based) du bon
-candidat dans SA liste, ou -1 si aucun candidat ne correspond."""
-
-
-class ChoixRapprochement(BaseModel):
-    id: int
-    index_candidat: int  # -1 si aucun candidat ne correspond
-
-
-class ChoixRapprochements(BaseModel):
-    choix: list[ChoixRapprochement]
-
-
-_client: genai.Client | None = None
-
-
-def _get_client() -> genai.Client:
-    global _client
-    if _client is None:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            st.error("GEMINI_API_KEY manquant dans .env")
-            st.stop()
-        _client = genai.Client(api_key=api_key)
-    return _client
-
-
-@_retry_surcharge
-def _arbitrer_par_lot(lot: list[tuple]) -> dict[int, int]:
-    """lot = liste de (id, designation_bordereau, [designations_candidates]).
-    Renvoie {id: index_candidat_choisi (-1 si aucun)}.
-    _retry_surcharge (reessai sur 503/coupure reseau) : meme protection que la
-    fusion - crash reel constate sur un 503 "high demand" en pleine recherche,
-    la page entiere plantait au lieu d'attendre que le pic passe."""
-    lignes = []
-    for id_, designation, candidats_txt in lot:
-        options = "  ".join(f"[{i}] {c!r}" for i, c in enumerate(candidats_txt))
-        lignes.append(f"{id_}. Bordereau: {designation!r}\n   Candidats: {options}")
-
-    response = _get_client().models.generate_content(
-        model=MODEL,
-        contents=[PROMPT_RAPPROCHEMENT, "\n".join(lignes)],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=ChoixRapprochements,
-            temperature=0,
-        ),
-    )
-    result = parse_reponse(response, ChoixRapprochements)
-    return {c.id: c.index_candidat for c in result.choix}
-
-
-@st.cache_resource
-def get_conn():
-    pgurl = os.getenv("PGURL")
-    if not pgurl:
-        st.error("PGURL manquant dans .env")
-        st.stop()
-    return psycopg.connect(pgurl, autocommit=True)
-
-
-conn = get_conn()
-
-# Bandeau d'etapes (stepper) : visualise ou en est le pipeline
-# extraction -> rapprochement -> validation Gemini. Meme mecanique que le
-# stepper du projet "Agent reunion" (cercles relies par des traits, 3 etats
-# fait/actif/a venir), recolore aux couleurs Ramery.
+# Bandeau d'etapes (stepper) : visualise ou en est le traitement d'une
+# demande EN COURS precisement. Repris a l'identique de l'ancienne version
+# synchrone (meme CSS, meme decoupage en 3 etapes) - seul le niveau de
+# detail change : avant, mis a jour ligne par ligne pendant le calcul ;
+# maintenant, lu depuis la colonne `etape` d'un job traite ailleurs, donc
+# par phase grossiere uniquement.
 ETAPES = [("extraction", "📄", "Extraction"), ("rapprochement", "🔍", "Rapprochement"), ("validation", "🤖", "Validation Gemini")]
 
 st.markdown(
     """
     <style>
-    .stepper-wrap { display: flex; align-items: flex-start; justify-content: center; margin: 0 auto 1.5rem; max-width: 600px; }
-    .step-item { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 110px; }
-    .step-icon { width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1rem; font-weight: 700; flex-shrink: 0; }
+    .stepper-wrap { display: flex; align-items: flex-start; justify-content: center; margin: 0 auto 1rem; max-width: 500px; }
+    .step-item { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 90px; }
+    .step-icon { width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: .8rem; font-weight: 700; flex-shrink: 0; }
     .step-icon-done    { background: #003D7C; color: #fff; }
-    .step-icon-active  { background: #003D7C; color: #fff; box-shadow: 0 0 12px rgba(0,61,124,.45); }
+    .step-icon-active  { background: #003D7C; color: #fff; box-shadow: 0 0 10px rgba(0,61,124,.45); }
     .step-icon-pending { background: #F0F0F0; color: #9CA3AF; border: 2px solid #D1D5DB; }
-    .step-label { font-size: .75rem; font-weight: 600; text-align: center; white-space: nowrap; }
+    .step-label { font-size: .68rem; font-weight: 600; text-align: center; white-space: nowrap; }
     .step-label-done    { color: #003D7C; }
     .step-label-active  { color: #003D7C; }
     .step-label-pending { color: #9CA3AF; }
-    .step-connector { flex: 1; height: 2px; margin-top: 18px; min-width: 25px; }
+    .step-connector { flex: 1; height: 2px; margin-top: 15px; min-width: 20px; }
     .step-connector-done    { background: #003D7C; }
     .step-connector-active  { background: linear-gradient(90deg, #003D7C 0%, #D1D5DB 100%); }
     .step-connector-pending { background: #E2E8F0; }
@@ -149,9 +61,9 @@ st.markdown(
 
 def _rendre_stepper(placeholder, etape_active: str | None) -> None:
     """etape_active = cle de l'etape en cours ('extraction', 'rapprochement',
-    'validation'), ou None pour tout marquer comme termine (pipeline fini)."""
-    cur = len(ETAPES) if etape_active is None else next(
-        i for i, (cle, _, _) in enumerate(ETAPES) if cle == etape_active
+    'validation'), ou None pour tout marquer comme en attente (rien demarre)."""
+    cur = -1 if etape_active is None else next(
+        (i for i, (cle, _, _) in enumerate(ETAPES) if cle == etape_active), 0
     )
     html = '<div class="stepper-wrap">'
     for i, (_, icone, label) in enumerate(ETAPES):
@@ -168,21 +80,30 @@ def _rendre_stepper(placeholder, etape_active: str | None) -> None:
     html += "</div>"
     placeholder.markdown(html, unsafe_allow_html=True)
 
+
+@st.cache_resource
+def get_conn():
+    pgurl = os.getenv("PGURL")
+    if not pgurl:
+        st.error("PGURL manquant dans .env")
+        st.stop()
+    return psycopg.connect(pgurl, autocommit=True)
+
+
+conn = get_conn()
+
 st.title("Recherche de prix pour un bordereau vierge")
 st.caption(
     "Upload un bordereau de prix SANS prix renseignés (DQE/BPU vierge à "
-    "compléter, désignations et unités présentes). L'IA extrait chaque "
-    "désignation, présélectionne les candidats les plus proches en base "
-    "(texte + unité identique, jamais entre deux nombres différents), puis "
-    "Gemini tranche lequel décrit vraiment le même produit avant d'afficher "
-    "le prix moyen corrigé correspondant."
+    "compléter, désignations et unités présentes). La demande est traitée "
+    "en arrière-plan (extraction, présélection, arbitrage Gemini) — inutile "
+    "de garder cette page ouverte, reviens consulter son statut plus tard "
+    "dans la liste ci-dessous."
 )
 
-# Une agence = un dossier SharePoint de premier niveau (Paris, Amiens...),
-# meme principe et memes noms que le selecteur de Prix unitaires - duplique
-# volontairement ici (chaque vue Streamlit est un script independant, meme
-# convention deja en place pour d'autres blocs partages dans ce projet).
-# "Toutes les agences" = comportement inchange (comparaison a toute la base).
+# ── Dépôt d'une demande ──────────────────────────────────────────────────
+st.subheader("Déposer une demande")
+
 agences_df = pd.read_sql(
     "SELECT DISTINCT agence FROM price_documents WHERE agence IS NOT NULL ORDER BY agence", conn
 )
@@ -192,238 +113,97 @@ agence_choisie = st.selectbox(
 )
 agence_filtre = None if agence_choisie == TOUTES_AGENCES else agence_choisie
 
+label_input = st.text_input("Nom de la demande (optionnel)", placeholder="ex : DQE Lot 3 - révision")
 fichier = st.file_uploader("Bordereau vierge (PDF)", type=["pdf"])
 
-if fichier is not None:
-    # Chaque interaction Streamlit (meme cliquer sur "Telecharger en CSV")
-    # relance TOUT le script depuis le haut - sans ce garde-fou, cliquer sur
-    # le bouton de telechargement relancait l'extraction ET tout le
-    # rapprochement Gemini a chaque fois (bug remonte). On ne re-EXTRAIT le
-    # fichier que s'il a change (nom+taille) - l'extraction ne depend pas de
-    # l'agence, la refaire pour un simple changement de filtre gaspillerait
-    # un appel Gemini couteux pour rien. Le RAPPROCHEMENT (candidats +
-    # arbitrage), lui, depend de l'agence - cache separe, cle = fichier +
-    # agence, pour re-matcher sans re-extraire quand on change juste le filtre.
-    identifiant_fichier = f"{fichier.name}_{fichier.size}"
-    stepper_placeholder = st.empty()
-
-    if st.session_state.get("prix_fichier_traite") != identifiant_fichier:
-        _rendre_stepper(stepper_placeholder, "extraction")
-        with st.spinner("Extraction des désignations en cours (peut prendre une minute)..."):
-            resultat = extract_pdf_sans_prix(fichier.getvalue(), filename=fichier.name)
-
-        st.success(f"{len(resultat.items)} ligne(s) de désignation extraite(s) du PDF.")
-        st.session_state["prix_fichier_traite"] = identifiant_fichier
-        st.session_state["prix_extraction"] = resultat
-        # Nouveau fichier -> tout rapprochement precedent (autre fichier)
-        # n'est plus valide, quelle que soit l'agence choisie.
-        st.session_state.pop("prix_cle_matching", None)
-
-    resultat = st.session_state["prix_extraction"]
-    cle_matching = f"{identifiant_fichier}::{agence_filtre or 'TOUTES'}"
-
-    if st.session_state.get("prix_cle_matching") != cle_matching:
-        _rendre_stepper(stepper_placeholder, "rapprochement")
-
-        # Etape 1 : pre-filtre rapide et gratuit (texte + unite + memes nombres)
-        # pour chaque ligne, sans encore rien decider - juste raccourcir la liste
-        # avant de deranger Gemini (jamais toute la base, seulement un top 5
-        # final). Le filtre "memes nombres" est applique DANS le SQL
-        # (nombres_texte), AVANT le LIMIT : la similarite texte seule ne "sait"
-        # pas qu'un nombre different disqualifie un candidat - avec un LIMIT
-        # applique avant ce filtre, un bon candidat au texte moins proche se
-        # faisait evincer du top-N par des candidats au texte proche mais au
-        # mauvais nombre, de toute facon rejetes ensuite. Bugs reels : "bordure
-        # ...type T2 <50ml" (bon candidat a 0.38 evince d'un top 5 par des 0.6+
-        # sans le "50"), puis "Canalisation PVC CR 8 Ø 125" (bon candidat
-        # "tuyaux PVC Ø125 CR8" encore evince d'un top 20 par des canalisations
-        # aux autres diametres). memes_nombres reste applique cote Python pour
-        # le sens de comparaison ("<2,50" vs ">2,50"), que le SQL ne voit pas.
-        candidats_par_item = []
-        n_items = len(resultat.items)
-        barre_preselection = st.progress(0.0, text="Présélection des candidats...")
-        for idx, item in enumerate(resultat.items):
-            candidats = pd.read_sql(
-                """
-                SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
-                       similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
-                FROM prix_moyen_par_designation_fn(%s)
-                WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
-                  AND nombres_texte(designation) = nombres_texte(%s)
-                ORDER BY score DESC
-                LIMIT 20
-                """,
-                conn, params=(item.designation, agence_filtre, item.unite, item.designation),
-            )
-            # Sur un resultat vide, pd.read_sql + psycopg renvoie un DataFrame
-            # sans colonnes -> sort_values("score") leverait un KeyError.
-            if not candidats.empty:
-                candidats = candidats[candidats["designation"].apply(lambda d: memes_nombres(item.designation, d))]
-                candidats = candidats.sort_values("score", ascending=False).head(5)
-
-            # Rattrapage : si l'egalite stricte des nombres ne donne AUCUN
-            # candidat, retenter en INCLUSION (nombres du candidat ⊆ nombres du
-            # bordereau). Cas reel : une ligne porteuse d'une borne de quantite
-            # ou de montant ("Grave 0/31.5 recyclee (<250T)", "Travaux compris
-            # entre 1500 et 5000 €") ne trouvait JAMAIS rien - le seuil
-            # tarifaire (250, 1500...) n'existe pas dans les designations en
-            # base. Sur le bordereau test, 22 des 36 lignes "aucun candidat"
-            # portaient une telle borne. Un candidat qui OMET un nombre du
-            # bordereau reste plausible (il n'affirme rien de contradictoire),
-            # contrairement a un candidat au nombre DIFFERENT - et Gemini
-            # arbitre toujours (jamais d'auto-accept ici : texte jamais
-            # identique par construction). Le sens de comparaison reste
-            # bloquant ("<2,50" ne matche pas ">2,50").
-            if candidats.empty:
-                candidats = pd.read_sql(
-                    """
-                    SELECT designation, sous_famille, unite, prix_moyen_corrige, nb_occurrences,
-                           similarity(normaliser_recherche(designation), normaliser_recherche(%s)) AS score
-                    FROM prix_moyen_par_designation_fn(%s)
-                    WHERE unite IS NOT DISTINCT FROM normaliser_unite(%s)
-                      AND nombres_tab(designation) <@ nombres_tab(%s)
-                    ORDER BY score DESC
-                    LIMIT 5
-                    """,
-                    conn, params=(item.designation, agence_filtre, item.unite, item.designation),
-                )
-                if not candidats.empty:
-                    sens_bordereau = _sens_comparaison(item.designation)
-                    candidats = candidats[candidats["designation"].apply(
-                        lambda d: sens_bordereau is None
-                        or _sens_comparaison(d) is None
-                        or _sens_comparaison(d) == sens_bordereau
-                    )]
-
-            candidats_par_item.append(candidats.reset_index(drop=True))
-            barre_preselection.progress(
-                (idx + 1) / n_items, text=f"Présélection des candidats... ({idx + 1}/{n_items})"
-            )
-        barre_preselection.empty()
-
-        # Etape 2 : score de similarite = 1.0 (texte identique une fois normalise)
-        # -> accepte directement, pas la peine de deranger Gemini pour confirmer
-        # une evidence. Gemini n'arbitre que les cas ou le texte n'est PAS
-        # parfaitement identique mais qu'il reste au moins un candidat pre-filtre
-        # (sinon : rien a arbitrer, "non trouve dans la base").
-        choix_gemini: dict[int, int] = {}
-        a_arbitrer = []
-        for i in range(n_items):
-            candidats = candidats_par_item[i]
-            if candidats.empty:
-                continue
-            if candidats.iloc[0]["score"] >= 0.999:
-                choix_gemini[i] = 0
-            else:
-                a_arbitrer.append((i, resultat.items[i].designation, candidats["designation"].tolist()))
-
-        if a_arbitrer:
-            _rendre_stepper(stepper_placeholder, "validation")
-            n_lots = -(-len(a_arbitrer) // TAILLE_LOT)
-            barre_arbitrage = st.progress(0.0, text=f"Gemini arbitre {len(a_arbitrer)} rapprochement(s)...")
-            for lot_idx, i in enumerate(range(0, len(a_arbitrer), TAILLE_LOT)):
-                lot = a_arbitrer[i:i + TAILLE_LOT]
-                choix_gemini.update(_arbitrer_par_lot(lot))
-                barre_arbitrage.progress(
-                    (lot_idx + 1) / n_lots,
-                    text=f"Gemini arbitre... (lot {lot_idx + 1}/{n_lots})",
-                )
-            barre_arbitrage.empty()
-
-        # Etape 3 : assemblage du resultat final
-        lignes_resultat = []
-        for i, item in enumerate(resultat.items):
-            candidats = candidats_par_item[i]
-            index_choisi = choix_gemini.get(i, -1)
-
-            if not candidats.empty and 0 <= index_choisi < len(candidats):
-                r = candidats.iloc[index_choisi]
-                lignes_resultat.append({
-                    "designation_bordereau": item.designation,
-                    "unite": item.unite,
-                    "designation_trouvee": r["designation"],
-                    "sous_famille_trouvee": r["sous_famille"],
-                    "prix_moyen_corrige": float(r["prix_moyen_corrige"]),
-                    "nb_occurrences": int(r["nb_occurrences"]),
-                    "score_correspondance": round(float(r["score"]), 2),
-                    "raison_echec": None,
-                    "proposition_a_valider": None,
-                    "prix_proposition": None,
-                })
-            else:
-                if candidats.empty:
-                    raison = "Aucun candidat présélectionné (texte, unité ou nombres différents)"
-                else:
-                    raison = f"Gemini a rejeté les {len(candidats)} candidat(s) présélectionné(s)"
-                # Sur un rejet, on affiche quand meme le MEILLEUR candidat et
-                # son prix comme PROPOSITION a valider par un humain - jamais
-                # comptee comme rapprochee (prix_moyen_corrige reste vide),
-                # jamais choisie automatiquement. L'analyse des rejets a montre
-                # deux populations : des rejets legitimes (produit absent de la
-                # base) et des rejets prudents ou le bon candidat etait la
-                # ("Tete d'aqueduc de securite..." pour "Tete d'aqueduc...") -
-                # dans les deux cas, montrer la meilleure piste transforme une
-                # recherche manuelle en simple validation d'un coup d'oeil.
-                meilleur = candidats.iloc[0] if not candidats.empty else None
-                lignes_resultat.append({
-                    "designation_bordereau": item.designation,
-                    "unite": item.unite,
-                    "designation_trouvee": None,
-                    "sous_famille_trouvee": None,
-                    "prix_moyen_corrige": None,
-                    "nb_occurrences": None,
-                    "score_correspondance": None,
-                    "raison_echec": raison,
-                    "proposition_a_valider": None if meilleur is None else meilleur["designation"],
-                    "prix_proposition": None if meilleur is None else float(meilleur["prix_moyen_corrige"]),
-                })
-
-        # Resultat de rapprochement mis en cache (cle fichier+agence) : les
-        # prochains re-runs du script (ex. clic sur "Telecharger en CSV")
-        # reutilisent ce resultat sans re-matcher, tant que ni le fichier ni
-        # l'agence choisie n'ont change.
-        st.session_state["prix_cle_matching"] = cle_matching
-        st.session_state["prix_df_resultat"] = pd.DataFrame(lignes_resultat)
-
-    # Etat final (fait ou reutilise du cache) : les 3 etapes passent a "fait".
-    _rendre_stepper(stepper_placeholder, None)
-
-    df_resultat = st.session_state["prix_df_resultat"]
-    nb_trouves = int(df_resultat["prix_moyen_corrige"].notna().sum())
-    st.write(f"**{nb_trouves} / {len(df_resultat)}** désignations rapprochées avec succès.")
-    if nb_trouves < len(df_resultat):
-        nb_sans_candidat = int(df_resultat["raison_echec"].str.startswith("Aucun candidat", na=False).sum())
-        nb_rejetes_gemini = int(df_resultat["raison_echec"].str.startswith("Gemini a rejeté", na=False).sum())
-        st.caption(
-            f"Sur les {len(df_resultat) - nb_trouves} lignes sans correspondance : "
-            f"{nb_sans_candidat} n'avaient aucun candidat présélectionné (texte/unité/nombres), "
-            f"{nb_rejetes_gemini} avaient des candidats mais Gemini a jugé qu'aucun ne correspondait vraiment. "
-            "Pour chacune, la colonne « Proposition (à valider) » montre le meilleur candidat écarté et son prix : "
-            "une piste à confirmer ou infirmer d'un coup d'œil, jamais comptée comme rapprochée automatiquement."
+if fichier is not None and st.button("🔍 Déposer la demande", type="primary"):
+    label = label_input.strip() or Path(fichier.name).stem
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO recherche_prix_jobs (label, fichier_nom, fichier_octets, agence) VALUES (%s, %s, %s, %s)",
+            (label, fichier.name, fichier.getvalue(), agence_filtre),
         )
+    st.success(f"Demande « {label} » déposée — suis son avancement ci-dessous.")
+    st.rerun()
 
-    st.dataframe(
-        df_resultat,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "designation_bordereau": "Désignation (bordereau)",
-            "unite": "Unité",
-            "designation_trouvee": "Désignation trouvée (base)",
-            "sous_famille_trouvee": "Sous-famille (base)",
-            "prix_moyen_corrige": st.column_config.NumberColumn("Prix moyen corrigé (€)", format="%.2f"),
-            "nb_occurrences": "Occurrences (base)",
-            "score_correspondance": st.column_config.NumberColumn("Score de similarité", format="%.2f"),
-            "raison_echec": "Raison (si non trouvé)",
-            "proposition_a_valider": "Proposition (à valider)",
-            "prix_proposition": st.column_config.NumberColumn("Prix proposition (€)", format="%.2f"),
-        },
-    )
+st.divider()
 
-    csv = df_resultat.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
-    st.download_button(
-        "📥 Télécharger en CSV",
-        data=csv,
-        file_name=f"prix_{Path(fichier.name).stem}.csv",
-        mime="text/csv",
-    )
+# ── Suivi des demandes ───────────────────────────────────────────────────
+col_titre, col_rafraichir = st.columns([5, 1])
+with col_titre:
+    st.subheader("Suivi des demandes")
+with col_rafraichir:
+    if st.button("🔄 Rafraîchir", use_container_width=True):
+        st.rerun()
+
+demandes = pd.read_sql(
+    "SELECT id, label, fichier_nom, agence, statut, etape, resultat, erreur, cree_le "
+    "FROM recherche_prix_jobs ORDER BY cree_le DESC",
+    conn,
+)
+
+if demandes.empty:
+    st.info("Aucune demande déposée pour l'instant.")
+
+for _, demande in demandes.iterrows():
+    titre = demande["label"] or demande["fichier_nom"]
+    meta = f"Déposée le {demande['cree_le'].strftime('%d/%m/%Y à %H:%M')} — {demande['fichier_nom']}"
+    if demande["agence"]:
+        meta += f" — {demande['agence']}"
+
+    with st.container(border=True):
+        col_label, col_statut = st.columns([3, 1])
+        with col_label:
+            st.markdown(f"**{titre}**")
+            st.caption(meta)
+        with col_statut:
+            st.markdown(f"<div style='text-align:right'>{STATUT_LABELS.get(demande['statut'], demande['statut'])}</div>", unsafe_allow_html=True)
+
+        if demande["statut"] == "erreur":
+            st.error(demande["erreur"] or "Erreur inconnue lors du traitement.")
+
+        elif demande["statut"] in ("en_attente", "en_cours"):
+            placeholder = st.empty()
+            _rendre_stepper(placeholder, demande["etape"] if demande["statut"] == "en_cours" else None)
+
+        elif demande["statut"] == "termine":
+            df_resultat = pd.DataFrame(demande["resultat"])
+            nb_trouves = int(df_resultat["prix_moyen_corrige"].notna().sum())
+            st.write(f"**{nb_trouves} / {len(df_resultat)}** désignations rapprochées avec succès.")
+
+            with st.expander("Voir le détail"):
+                if nb_trouves < len(df_resultat):
+                    nb_sans_candidat = int(df_resultat["raison_echec"].str.startswith("Aucun candidat", na=False).sum())
+                    nb_rejetes_gemini = int(df_resultat["raison_echec"].str.startswith("Gemini a rejeté", na=False).sum())
+                    st.caption(
+                        f"Sur les {len(df_resultat) - nb_trouves} lignes sans correspondance : "
+                        f"{nb_sans_candidat} n'avaient aucun candidat présélectionné (texte/unité/nombres), "
+                        f"{nb_rejetes_gemini} avaient des candidats mais Gemini a jugé qu'aucun ne correspondait vraiment. "
+                        "Pour chacune, la colonne « Proposition (à valider) » montre le meilleur candidat écarté et son prix."
+                    )
+                st.dataframe(
+                    df_resultat,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "designation_bordereau": "Désignation (bordereau)",
+                        "unite": "Unité",
+                        "designation_trouvee": "Désignation trouvée (base)",
+                        "sous_famille_trouvee": "Sous-famille (base)",
+                        "prix_moyen_corrige": st.column_config.NumberColumn("Prix moyen corrigé (€)", format="%.2f"),
+                        "nb_occurrences": "Occurrences (base)",
+                        "score_correspondance": st.column_config.NumberColumn("Score de similarité", format="%.2f"),
+                        "raison_echec": "Raison (si non trouvé)",
+                        "proposition_a_valider": "Proposition (à valider)",
+                        "prix_proposition": st.column_config.NumberColumn("Prix proposition (€)", format="%.2f"),
+                    },
+                )
+
+            csv = df_resultat.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig")
+            st.download_button(
+                "📥 Télécharger en CSV",
+                data=csv,
+                file_name=f"prix_{titre}.csv",
+                mime="text/csv",
+                key=f"csv_{demande['id']}",
+            )

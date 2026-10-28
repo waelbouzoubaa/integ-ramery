@@ -227,6 +227,48 @@ CREATE TABLE IF NOT EXISTS echecs_traitement (
     resolu       boolean     NOT NULL DEFAULT false
 );
 
+-- Demande de "Recherche de prix" (bordereau vierge) traitee en ARRIERE-PLAN
+-- par le watcher (voir pdf_watcher.py), pas dans le script Streamlit - sans
+-- ca, l'etat du traitement (extraction + rapprochement + arbitrage Gemini,
+-- plusieurs minutes sur un gros fichier) ne vivait que dans st.session_state,
+-- perdu au moindre rafraichissement de page. Meme principe que les
+-- "requests" du projet file-diff-ramery (file d'attente en base, un seul
+-- watcher la vide en FIFO) : la page Streamlit affiche TOUTES les demandes
+-- (liste chronologique), pas une seule suivie via un lien a conserver -
+-- rouvrir la page suffit, aucun identifiant a retenir.
+-- statut : 'en_attente' -> 'en_cours' -> 'termine' ou 'erreur'.
+-- etape (pendant 'en_cours' seulement) : 'extraction', 'rapprochement' ou
+-- 'validation' - affichage seul, meme decoupage que l'ancien stepper visuel.
+-- resultat : les lignes finales (meme structure que l'ancien DataFrame),
+-- NULL tant que ce n'est pas termine.
+-- label : nom optionnel donne par l'utilisateur au depot (sinon, retombe sur
+-- fichier_nom a l'affichage - jamais NULL cote UI, mais nullable ici pour ne
+-- pas forcer une valeur par defaut arbitraire en base).
+-- attempts : nombre de fois qu'une demande a ete remise en 'en_attente'
+-- apres avoir ete jugee bloquee (voir _requeue_jobs_bloques) - au-dela de
+-- MAX_TENTATIVES_RECHERCHE_PRIX, part en erreur plutot que de boucler.
+CREATE TABLE IF NOT EXISTS recherche_prix_jobs (
+    id             bigserial PRIMARY KEY,
+    label          text,
+    fichier_nom    text        NOT NULL,
+    fichier_octets bytea       NOT NULL,
+    agence         text,
+    statut         text        NOT NULL DEFAULT 'en_attente',
+    etape          text,
+    resultat       jsonb,
+    erreur         text,
+    attempts       integer     NOT NULL DEFAULT 0,
+    cree_le        timestamptz NOT NULL DEFAULT now(),
+    demarre_le     timestamptz,
+    termine_le     timestamptz
+);
+
+-- Index sur (statut, cree_le) : le watcher pioche toujours la plus ancienne
+-- demande 'en_attente' (FIFO) - voir _boucle_jobs_recherche_prix dans
+-- pdf_watcher.py.
+CREATE INDEX IF NOT EXISTS idx_recherche_prix_jobs_statut
+    ON recherche_prix_jobs (statut, cree_le);
+
 CREATE TABLE IF NOT EXISTS price_lines (
     id             bigserial PRIMARY KEY,
     document_id    bigint      NOT NULL REFERENCES price_documents(id) ON DELETE CASCADE,
