@@ -1,0 +1,87 @@
+stages:
+  - build
+ 
+ 
+.pre-build:
+  before_script:
+    - |
+      set -e
+      VERSION="$CI_COMMIT_SHORT_SHA"
+      if [[ "$CI_COMMIT_REF_NAME" == "$CI_DEFAULT_BRANCH" ]]; then
+        for path in . ; do
+          dir="$CI_PROJECT_DIR/$path"
+          [[ -f "$dir/Dockerfile" ]] || continue
+          from=$(head -n 1 "$dir/Dockerfile")
+          if [[ "$from" == *:* ]]; then
+            VERSION="${from#*:}"
+            VERSION="${VERSION%% *}"
+          else
+            VERSION="latest"
+          fi
+          break
+        done
+      fi
+      export VERSION
+      echo "VERSION=$VERSION" > build.env
+
+
+build:
+  stage: build
+  image: docker:latest
+  extends:
+    - .pre-build
+  services:
+    - docker:dind
+  script:
+    - |
+      set -e
+      docker login         -u "$CI_REGISTRY_USER"         -p "$CI_REGISTRY_PASSWORD"         "$CI_REGISTRY"
+
+      for path in . ; do
+        dir="$CI_PROJECT_DIR/$path"
+        [[ -f "$dir/Dockerfile" ]] || continue
+
+        file_name=$(basename "$dir")
+        if [[ "$file_name" == "." ]]; then
+          file_name=$(basename "$CI_REGISTRY_IMAGE")
+        fi
+        IMAGE="$CI_REGISTRY_IMAGE/$file_name"
+        echo "Preparing build context for $file_name"
+
+        mkdir -p "$dir/scripts"
+        cp build/general/scripts/vault-wrapper.sh           "$dir/scripts/vault-wrapper.sh" || true
+        cp build/general/scripts/vault-wrapper-old.sh           "$dir/scripts/vault-wrapper-old.sh" || true
+        cp build/general/scripts/update.sh           "$dir/scripts/update.sh" || true
+
+        VERSION="$CI_COMMIT_SHORT_SHA"
+        if [[ "$CI_COMMIT_REF_NAME" == "$CI_DEFAULT_BRANCH" ]]; then
+          from=$(head -n 1 "$dir/Dockerfile")
+          if [[ "$from" == *:* ]]; then
+            VERSION="${from#*:}"
+            VERSION="${VERSION%% *}"
+          else
+            VERSION="latest"
+          fi
+        fi
+
+        if [[ -z "$VERSION" ]]; then
+          echo "❌ Impossible de récupéré la version de l'image dans le Dockerfile ! Veuillez vous assurer que la première ligne soit bien un FROM ...."
+          exit 1
+        fi
+
+        echo "Building and pushing $IMAGE:$VERSION"
+        echo "Building and pushing $IMAGE:latest"
+
+        docker buildx build           --pull           --no-cache           --push           -t "$IMAGE:$VERSION"           -t "$IMAGE:latest"           "$dir"
+      done
+
+  artifacts:
+    reports:
+      dotenv: build.env
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+      changes:
+        - "./**/*"
+ 
+ 
+
