@@ -19,9 +19,12 @@ services:
     build: .
     container_name: integ-ramery2-watcher
     env_file: .env
+    environment:
+      CERT_PRIVATE_KEY_PATH: /app/certs/private_key.pem
     volumes:
       - ./data:/app/data
       - ./out:/app/out
+      - ./certs/ramery-prod.key:/app/certs/private_key.pem:ro
     depends_on:
       postgres:
         condition: service_healthy
