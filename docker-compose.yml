@@ -13,6 +13,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   watcher:
     build: .
@@ -32,12 +33,27 @@ services:
     env_file: .env
     working_dir: /app/src/restitution
     command: ["uv", "run", "--no-sync", "streamlit", "run", "app.py", "--server.address=0.0.0.0"]
-    ports:
-      - "8502:8501"
     depends_on:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - default
+      - infra_networks
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=infra_networks"
+      - "traefik.http.routers.prix-unitaires.rule=Host(`prix-unitaires.${MAIN_DOMAIN}`)"
+      - "traefik.http.routers.prix-unitaires.entrypoints=websecure"
+      - "traefik.http.routers.prix-unitaires.tls.certresolver=letsencrypt"
+      - "traefik.http.services.prix-unitaires.loadbalancer.server.port=8501"
+      - "traefik.http.routers.prix-unitaires.middlewares=core-ipallowlist@docker"
 
 volumes:
   postgres_data:
+
+networks:
+  default:
+    name: integ-ramery-network
+  infra_networks:
+    external: true
