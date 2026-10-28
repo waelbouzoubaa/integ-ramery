@@ -1,0 +1,6 @@
+services:
+  watcher:
+    entrypoint: []
+  streamlit:
+    entrypoint: []
+    command: ["uv", "run", "--no-sync", "streamlit", "run", "app.py", "--server.address=0.0.0.0"]
