@@ -17,6 +17,18 @@ CERT_PRIVATE_KEY_PATH = os.getenv("CERT_PRIVATE_KEY_PATH")
 SHAREPOINT_HOST = os.getenv("SHAREPOINT_HOST")
 SHAREPOINT_SITE_PATH = os.getenv("SHAREPOINT_SITE_PATH", "/")
 
+# Nom de la BIBLIOTHEQUE DE DOCUMENTS (drive Graph API) a utiliser, pas un
+# sous-dossier - un site SharePoint peut heberger plusieurs bibliotheques
+# (ex. "Documents" par defaut + "Etudes significatives TP" en onglet separe
+# sur le site "Travaux Publics"). Vide = comportement historique (premiere
+# bibliotheque renvoyee par l'API, correct quand le site n'en a qu'une).
+# Sans valeur ici sur un site a plusieurs bibliotheques, le watcher scanne
+# la bibliotheque par defaut ("Documents") au lieu de celle qui contient
+# vraiment les bordereaux - incident reel qui a motive cette variable (le
+# multi-agences traitait alors une tuile de navigation de "Documents" comme
+# une fausse agence).
+SHAREPOINT_LIBRARY = os.getenv("SHAREPOINT_LIBRARY", "")
+
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))
 
 # Nombre de demandes "Recherche de prix" traitees EN PARALLELE (voir

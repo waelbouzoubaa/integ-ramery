@@ -8,6 +8,7 @@ from config import (
     CERT_PRIVATE_KEY_PATH,
     SHAREPOINT_HOST,
     SHAREPOINT_SITE_PATH,
+    SHAREPOINT_LIBRARY,
 )
 
 GRAPH_URL = "https://graph.microsoft.com/v1.0"
@@ -54,10 +55,29 @@ def get_site_id():
 
 
 def get_drive_id(site_id):
+    """Sans SHAREPOINT_LIBRARY (comportement historique), renvoie la
+    premiere bibliotheque - correct uniquement quand le site n'en a qu'une.
+    Avec SHAREPOINT_LIBRARY, cherche la bibliotheque de CE nom exact parmi
+    toutes celles du site - un site peut en avoir plusieurs (ex. "Documents"
+    par defaut + une autre en onglet separe), prendre la premiere au hasard
+    scannerait la mauvaise (incident reel : une bibliotheque "Documents" non
+    pertinente, confondue avec "Etudes significatives TP")."""
     resp = requests.get(
         f"{GRAPH_URL}/sites/{site_id}/drives",
         headers=get_headers()
     )
     resp.raise_for_status()
     drives = resp.json()["value"]
-    return drives[0]["id"]
+
+    if not SHAREPOINT_LIBRARY:
+        return drives[0]["id"]
+
+    for drive in drives:
+        if drive["name"] == SHAREPOINT_LIBRARY:
+            return drive["id"]
+
+    noms_disponibles = ", ".join(repr(d["name"]) for d in drives)
+    raise Exception(
+        f"Bibliotheque {SHAREPOINT_LIBRARY!r} introuvable sur ce site. "
+        f"Bibliotheques disponibles : {noms_disponibles}"
+    )
