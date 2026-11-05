@@ -70,10 +70,12 @@ def get_drive_id(site_id):
     drives = resp.json()["value"]
 
     if not SHAREPOINT_LIBRARY:
+        print(f"[sharepoint] SHAREPOINT_LIBRARY non defini, bibliotheque par defaut utilisee : {drives[0]['name']!r}")
         return drives[0]["id"]
 
     for drive in drives:
         if drive["name"] == SHAREPOINT_LIBRARY:
+            print(f"[sharepoint] bibliotheque selectionnee par nom : {drive['name']!r} (id={drive['id']})")
             return drive["id"]
 
     noms_disponibles = ", ".join(repr(d["name"]) for d in drives)
